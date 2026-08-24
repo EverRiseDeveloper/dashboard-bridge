@@ -8,13 +8,15 @@ from pathlib import Path
 
 from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
 from .const import CONF_FILENAME, CONF_FOLDER, DEFAULT_FILENAME, DEFAULT_FOLDER, DOMAIN
+from .frontend_updater import install_latest, www_dir
 from .http import DashboardConfigView
 from .storage import resolve_config_path, write_json_atomic
 
-PLATFORMS: list[str] = []
+PLATFORMS: list[Platform] = [Platform.UPDATE]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,12 +65,32 @@ def _seed_default_config_if_missing(hass: HomeAssistant, folder: str, filename: 
         _LOGGER.error("Failed seeding default config at %s: %s", path, err)
 
 
+async def _bootstrap_frontend_if_missing(hass: HomeAssistant) -> None:
+    """Installing the bridge alone should produce a working dashboard, not
+    a 404 in www/ — so the very first setup downloads dashboard-dist the
+    same way the Update entity's Install button later does (see
+    frontend_updater.py). An existing install (any prior build already
+    sitting in www/) is left alone; this only ever fires once per client."""
+    target = www_dir(hass)
+    already_installed = await hass.async_add_executor_job(lambda: target.exists() and any(target.iterdir()))
+    if already_installed:
+        return
+    _LOGGER.info("No dashboard frontend found at %s — installing the latest build", target)
+    if not await install_latest(hass):
+        _LOGGER.error(
+            "Couldn't install the dashboard frontend automatically. The bridge/config API will still "
+            "work, but the dashboard itself won't load until this is retried (reload the integration, "
+            "or wait for the Update entity's next check) or installed manually."
+        )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
     folder = entry.options.get(CONF_FOLDER, DEFAULT_FOLDER)
     filename = entry.options.get(CONF_FILENAME, DEFAULT_FILENAME)
     await hass.async_add_executor_job(_seed_default_config_if_missing, hass, folder, filename)
+    await _bootstrap_frontend_if_missing(hass)
 
     # The HTTP view is registered once for the lifetime of this HA process —
     # aiohttp's router has no public "unregister route" API, so re-adding or
@@ -105,15 +127,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("Panel %s was already registered", PANEL_URL_PATH)
         hass.data[DOMAIN]["panel_registered"] = True
 
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    # Nothing to tear down beyond what async_on_unload already handles —
-    # the HTTP view stays registered (see note above) but will report 503
-    # via DashboardConfigView._entry_options() once no entry remains.
-    return True
+    # The HTTP view and panel registration stay in place regardless (see
+    # notes above — there's no "unregister" for either), but the Update
+    # entity platform does need a normal unload.
+    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
