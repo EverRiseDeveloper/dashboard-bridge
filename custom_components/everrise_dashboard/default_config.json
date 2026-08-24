@@ -1,0 +1,42 @@
+{
+  "household": {
+    "name": "New Client"
+  },
+  "headerStats": [
+    {
+      "key": "temp",
+      "label": "Temperature",
+      "icon": "temp",
+      "unit": "°C",
+      "decimals": 1,
+      "source": {
+        "type": "attribute",
+        "entityId": "weather.forecast_home",
+        "attribute": "temperature"
+      }
+    },
+    {
+      "key": "humidity",
+      "label": "Humidity",
+      "icon": "humidity",
+      "unit": "%",
+      "decimals": 0,
+      "source": {
+        "type": "attribute",
+        "entityId": "weather.forecast_home",
+        "attribute": "humidity"
+      }
+    },
+    {
+      "key": "condition",
+      "label": "Weather",
+      "icon": "condition",
+      "unit": "",
+      "decimals": 0,
+      "source": {
+        "type": "text",
+        "entityId": "weather.forecast_home"
+      }
+    }
+  ]
+}

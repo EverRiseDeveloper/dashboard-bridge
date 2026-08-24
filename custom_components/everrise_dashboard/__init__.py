@@ -1,0 +1,123 @@
+"""The Everrise Dashboard Config Bridge integration."""
+
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+
+from homeassistant.components.panel_custom import async_register_panel
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+
+from .const import CONF_FILENAME, CONF_FOLDER, DEFAULT_FILENAME, DEFAULT_FOLDER, DOMAIN
+from .http import DashboardConfigView
+from .storage import resolve_config_path, write_json_atomic
+
+PLATFORMS: list[str] = []
+
+_LOGGER = logging.getLogger(__name__)
+
+# Registers the dashboard as a native Home Assistant panel — a custom
+# element Home Assistant mounts directly into its own already-authenticated
+# page, instead of the old `iframe` Lovelace card approach. That matters
+# because an iframe is a genuinely separate, unauthenticated browsing
+# context (it has to do its own OAuth login dance to get a token), which
+# the Companion App's WebView turned out not to support reliably in several
+# unrelated ways. A native panel has no separate context to authenticate:
+# Home Assistant hands it the current user's already-live `hass.connection`
+# / `hass.auth` directly (see the frontend's src/panel.tsx).
+#
+# The JS module is served from the same www/ folder the main dashboard app
+# already deploys to via `npm run build:ha` — vite.config.ts builds it as a
+# second, fixed-filename entry point (not content-hashed, since this path
+# is referenced literally here rather than through a generated index.html).
+PANEL_JS_URL = "/local/everrise-dashboard/panel.js"
+PANEL_WEBCOMPONENT_NAME = "everrise-dashboard-panel"
+PANEL_URL_PATH = "everrise"
+
+# Bundled alongside this file — ships inside custom_components/everrise_dashboard/
+# with every HACS install, same as manifest.json or the translations folder.
+_BUNDLED_DEFAULT_CONFIG_PATH = Path(__file__).parent / "default_config.json"
+
+
+def _seed_default_config_if_missing(hass: HomeAssistant, folder: str, filename: str) -> None:
+    """Write the bundled placeholder config the first time this integration
+    is set up for a client, so the dashboard has something valid to render —
+    a household name to rename and the weather-derived header stats, which
+    point at `weather.forecast_home`, the entity HA's own onboarding creates
+    by default on every fresh install — instead of the Config Bridge API
+    404ing until someone performs a first save through the Admin UI.
+
+    Runs on every setup/reload, but only ever writes once: an existing file
+    (a client's real, already-populated config) is never touched.
+    """
+    path = resolve_config_path(hass, folder, filename)
+    if path is None or path.exists():
+        return
+    try:
+        default_config = json.loads(_BUNDLED_DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+        write_json_atomic(path, default_config)
+        _LOGGER.info("Seeded a placeholder dashboard config at %s", path)
+    except OSError as err:
+        _LOGGER.error("Failed seeding default config at %s: %s", path, err)
+
+
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    hass.data.setdefault(DOMAIN, {})
+
+    folder = entry.options.get(CONF_FOLDER, DEFAULT_FOLDER)
+    filename = entry.options.get(CONF_FILENAME, DEFAULT_FILENAME)
+    await hass.async_add_executor_job(_seed_default_config_if_missing, hass, folder, filename)
+
+    # The HTTP view is registered once for the lifetime of this HA process —
+    # aiohttp's router has no public "unregister route" API, so re-adding or
+    # reloading the config entry must not try to register it twice. The view
+    # itself looks up the live config entry (folder/filename options) fresh
+    # on every request, so it stays correct across entry reloads/edits even
+    # though the route registration itself is a one-time thing.
+    if not hass.data[DOMAIN].get("view_registered"):
+        hass.http.register_view(DashboardConfigView(hass))
+        hass.data[DOMAIN]["view_registered"] = True
+
+    # Same one-time-per-process reasoning as the HTTP view above — panel
+    # registration has no "reload"/"update" story either (it's a straight
+    # call into the frontend's built-in panel table), so a config entry
+    # reload must not try to register the same frontend_url_path twice.
+    if not hass.data[DOMAIN].get("panel_registered"):
+        try:
+            await async_register_panel(
+                hass,
+                frontend_url_path=PANEL_URL_PATH,
+                webcomponent_name=PANEL_WEBCOMPONENT_NAME,
+                sidebar_title="EverRise",
+                sidebar_icon="mdi:home-lightning-bolt",
+                module_url=PANEL_JS_URL,
+                require_admin=False,
+                embed_iframe=False,
+                trust_external=False,
+            )
+        except ValueError:
+            # Home Assistant raises this if frontend_url_path is already
+            # registered (e.g. a second config entry reload within the same
+            # HA process, since there's no "unregister" to undo the first
+            # one) — not an error worth surfacing, the panel is already up.
+            _LOGGER.debug("Panel %s was already registered", PANEL_URL_PATH)
+        hass.data[DOMAIN]["panel_registered"] = True
+
+    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    # Nothing to tear down beyond what async_on_unload already handles —
+    # the HTTP view stays registered (see note above) but will report 503
+    # via DashboardConfigView._entry_options() once no entry remains.
+    return True
+
+
+async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    # Options (folder/filename) are read fresh per-request by the view, so
+    # no explicit reload action is needed here — this listener exists so
+    # HA doesn't warn about an options flow with no update handling.
+    return None

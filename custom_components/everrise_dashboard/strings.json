@@ -1,0 +1,36 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Everrise Dashboard Config Bridge",
+        "description": "Exposes an authenticated read/write API for your Everrise Dashboard's config.json, so the dashboard's Admin page can edit it instead of hand-editing the file. Most installs can leave the defaults as-is.",
+        "data": {
+          "folder": "Dashboard folder name (under config/www/)",
+          "filename": "Config filename"
+        }
+      }
+    },
+    "error": {
+      "invalid_folder": "Folder name can only contain letters, numbers, underscores, and hyphens.",
+      "invalid_filename": "Filename must end in .json and can only contain letters, numbers, underscores, hyphens, and periods."
+    },
+    "abort": {
+      "single_instance_allowed": "Only one instance of this integration is needed per Home Assistant install."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Everrise Dashboard Config Bridge options",
+        "data": {
+          "folder": "Dashboard folder name (under config/www/)",
+          "filename": "Config filename"
+        }
+      }
+    },
+    "error": {
+      "invalid_folder": "Folder name can only contain letters, numbers, underscores, and hyphens.",
+      "invalid_filename": "Filename must end in .json and can only contain letters, numbers, underscores, hyphens, and periods."
+    }
+  }
+}

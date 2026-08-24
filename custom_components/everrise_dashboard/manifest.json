@@ -1,0 +1,12 @@
+{
+  "domain": "everrise_dashboard",
+  "name": "Everrise Dashboard Config Bridge",
+  "config_flow": true,
+  "dependencies": ["panel_custom"],
+  "documentation": "https://github.com/Hakim2014/everrise-dashboard-bridge",
+  "issue_tracker": "https://github.com/Hakim2014/everrise-dashboard-bridge/issues",
+  "codeowners": ["@Hakim2014"],
+  "version": "0.2.0",
+  "requirements": [],
+  "iot_class": "local_push"
+}
