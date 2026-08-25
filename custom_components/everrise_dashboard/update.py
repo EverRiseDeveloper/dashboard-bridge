@@ -26,10 +26,17 @@ from .frontend_updater import get_installed_version, get_latest_version, install
 _LOGGER = logging.getLogger(__name__)
 
 # How often to ask GitHub whether a new version exists. Cheap (one small
-# version.json fetch), so this doesn't need to be aggressive — a client
-# clicking "Check for updates" in HA's own Updates page also triggers an
-# immediate refresh regardless of this interval.
-_CHECK_INTERVAL = timedelta(hours=6)
+# version.json fetch, cache-busted with a query param), so there's no real
+# cost to checking often — a client clicking "Check for updates" in HA's
+# own Updates page also triggers an immediate refresh regardless of this
+# interval. Used to be 6 hours; a fresh deploy-dist.yml build could then sit
+# undetected for up to 6 hours with nothing but a manual "Check for updates"
+# click to shortcut it — annoying enough in practice (twice, on Client_003)
+# that a short poll plus the auto-install automation below (see
+# restart_automation.py's AUTO_INSTALL_FRONTEND_AUTOMATION_ID) fully closes
+# the loop instead: push a build, and it's live in www/ within minutes with
+# no one needing to touch HA at all.
+_CHECK_INTERVAL = timedelta(minutes=15)
 
 
 def _parse_semver(value: str) -> tuple[int, int, int] | None:

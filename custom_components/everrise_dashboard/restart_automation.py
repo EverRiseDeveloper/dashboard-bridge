@@ -1,15 +1,18 @@
-"""Seeds the two automations that make bridge updates fully hands-off, into
-every client's automations.yaml the first time this integration is set up —
-same one-time, never-overwrite pattern __init__.py already uses for
-default_config.json.
+"""Seeds the three automations that make both bridge AND dashboard-frontend
+updates fully hands-off, into every client's automations.yaml the first time
+this integration is set up — same one-time, never-overwrite pattern
+__init__.py already uses for default_config.json.
 
-Two separate automations, not one, because "download" and "restart" have
-very different risk profiles and shouldn't share a trigger:
+Three separate automations, not one, because "download" and "restart" have
+very different risk profiles and shouldn't share a trigger, and because the
+bridge (Python code, needs a restart to actually load) and the dashboard
+frontend (static files in www/, live the moment they're written) don't
+either:
 
-1. Auto-install — fires the instant HACS's own update entity for this repo
-   reports a new release, and just calls `update.install` on it. Cheap and
-   harmless to do immediately: it only writes files to disk, same as a
-   client clicking Update themselves.
+1. Auto-install bridge update — fires the instant HACS's own update entity
+   for this repo reports a new release, and just calls `update.install` on
+   it. Cheap and harmless to do immediately: it only writes files to disk,
+   same as a client clicking Update themselves.
 2. Restart-if-pending — fires at 3am, but only restarts if the bridge's
    own "restart required" sensor (binary_sensor.py) says the files on disk
    don't match what's actually loaded yet. A full HA restart is genuinely
@@ -17,12 +20,18 @@ very different risk profiles and shouldn't share a trigger:
    gating on both a quiet-hours schedule AND "is there actually anything
    to activate" — a client who restarts manually before 3am leaves that
    sensor already off, and this does nothing.
+3. Auto-install dashboard frontend update — fires the instant update.py's
+   own coordinator (polling every 15 minutes — see update.py) reports a new
+   dashboard-dist build, and calls `update.install` on it. No restart
+   companion needed here: frontend_updater.install_latest() only swaps
+   files in www/, which every subsequent page load just picks up — there's
+   no Python import to go stale the way there is for the bridge itself.
 
 Why automations.yaml rather than something this integration just does in
-Python directly: a client should be able to see, disable, or delete either
-of these like any other automation — not have it be invisible behavior
-baked into the integration. automations.yaml is a plain, user-facing YAML
-file (not `.storage/`, which is Home Assistant's internal state) — the same
+Python directly: a client should be able to see, disable, or delete any of
+these like any other automation — not have it be invisible behavior baked
+into the integration. automations.yaml is a plain, user-facing YAML file
+(not `.storage/`, which is Home Assistant's internal state) — the same
 file the Automation Editor UI itself reads and writes; this only differs in
 doing it once, programmatically, on first setup.
 
@@ -49,13 +58,17 @@ _LOGGER = logging.getLogger(__name__)
 
 # Fixed and stable across every client — how we recognize "already seeded"
 # (or "the client kept it") on every future setup. binary_sensor.py's
-# entity and HACS's own generated update entity both have deterministic,
-# device-less slugs, so hardcoding their entity_ids here is safe.
+# entity, HACS's own generated bridge update entity, and update.py's own
+# frontend update entity all have deterministic, device-less slugs (each is
+# the only entity of its kind on a single-instance-per-client config entry),
+# so hardcoding their entity_ids here is safe.
 RESTART_REQUIRED_SENSOR = "binary_sensor.bridge_restart_required"
 BRIDGE_UPDATE_ENTITY = "update.everrise_dashboard_config_bridge_update"
+FRONTEND_UPDATE_ENTITY = "update.dashboard_frontend"
 
 AUTO_INSTALL_AUTOMATION_ID = "everrise_dashboard_auto_install_bridge_update"
 RESTART_AUTOMATION_ID = "everrise_dashboard_restart_if_pending"
+AUTO_INSTALL_FRONTEND_AUTOMATION_ID = "everrise_dashboard_auto_install_frontend_update"
 
 SEEDED_AUTOMATIONS = [
     {
@@ -89,6 +102,21 @@ SEEDED_AUTOMATIONS = [
         "actions": [{"action": "homeassistant.restart"}],
         "mode": "single",
     },
+    {
+        "id": AUTO_INSTALL_FRONTEND_AUTOMATION_ID,
+        "alias": "Auto-install dashboard frontend update",
+        "description": (
+            "Installs a new dashboard build (from dashboard-dist) the moment it's detected — no "
+            "click needed, and nothing to restart: it only swaps static files in www/, which the "
+            "next dashboard page load picks up on its own. Seeded automatically by the bridge on "
+            "first setup; edit or delete it like any other automation — it's never re-created "
+            "once it exists."
+        ),
+        "triggers": [{"trigger": "state", "entity_id": FRONTEND_UPDATE_ENTITY, "to": "on"}],
+        "conditions": [],
+        "actions": [{"action": "update.install", "target": {"entity_id": FRONTEND_UPDATE_ENTITY}}],
+        "mode": "single",
+    },
 ]
 
 
@@ -97,8 +125,9 @@ def _seed(automations_path: Path) -> bool:
     Returns True only if at least one new entry was actually written, so
     the caller knows whether an `automation.reload` is worth doing. Each
     of SEEDED_AUTOMATIONS is checked independently by its own fixed id, so
-    a client who deleted just one of the two still only gets that one
-    re-seeded — never both, and never a duplicate of the one they kept."""
+    a client who deleted just one of the three still only gets that one
+    re-seeded — never the others, and never a duplicate of the ones they
+    kept."""
     try:
         existing = yaml.safe_load(automations_path.read_text(encoding="utf-8")) if automations_path.exists() else []
     except (OSError, yaml.YAMLError) as err:
