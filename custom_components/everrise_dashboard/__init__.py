@@ -14,9 +14,10 @@ from homeassistant.core import HomeAssistant
 from .const import CONF_FILENAME, CONF_FOLDER, DEFAULT_FILENAME, DEFAULT_FOLDER, DOMAIN
 from .frontend_updater import install_latest, www_dir
 from .http import DashboardConfigView
+from .restart_automation import async_seed_restart_automation_if_missing
 from .storage import resolve_config_path, write_json_atomic
 
-PLATFORMS: list[Platform] = [Platform.UPDATE]
+PLATFORMS: list[Platform] = [Platform.UPDATE, Platform.BINARY_SENSOR]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -91,6 +92,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     filename = entry.options.get(CONF_FILENAME, DEFAULT_FILENAME)
     await hass.async_add_executor_job(_seed_default_config_if_missing, hass, folder, filename)
     await _bootstrap_frontend_if_missing(hass)
+    await async_seed_restart_automation_if_missing(hass)
 
     # The HTTP view is registered once for the lifetime of this HA process —
     # aiohttp's router has no public "unregister route" API, so re-adding or

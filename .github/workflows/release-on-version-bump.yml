@@ -1,0 +1,58 @@
+name: Publish a release on version bump
+
+# HACS's update detection is built around actual GitHub Releases, not just
+# a bumped manifest.json commit — see the incident that motivated this
+# workflow: 0.3.1 and 0.4.0 were pushed to main with the manifest bumped,
+# but HACS kept reporting 0.3.0 as the latest available version for every
+# client, because no Release ever existed for anything past 0.3.0. This
+# closes that gap: every push to main that changes manifest.json's version
+# automatically gets a matching GitHub Release, so HACS (and the 3am
+# restart-if-needed automation clients run) actually sees it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - custom_components/everrise_dashboard/manifest.json
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read manifest version
+        id: version
+        run: |
+          VERSION=$(jq -r '.version' custom_components/everrise_dashboard/manifest.json)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Skip if this version is already released
+        # Not every push to main that touches manifest.json actually changes
+        # the version (a formatting fix, a merge, etc.) — and gh release
+        # create would fail outright on a duplicate tag anyway, so check
+        # first and skip cleanly instead of failing the workflow.
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ steps.version.outputs.version }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Version ${{ steps.version.outputs.version }} already has a release — nothing to do."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --target main \
+            --title "${{ steps.version.outputs.version }}" \
+            --generate-notes
