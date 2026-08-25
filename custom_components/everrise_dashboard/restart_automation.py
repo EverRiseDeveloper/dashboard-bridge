@@ -43,6 +43,7 @@ from uuid import uuid4
 import yaml
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -139,7 +140,23 @@ def _seed(automations_path: Path) -> bool:
 async def async_seed_restart_automation_if_missing(hass: HomeAssistant) -> None:
     automations_path = Path(hass.config.path("automations.yaml"))
     seeded = await hass.async_add_executor_job(_seed, automations_path)
-    if seeded:
-        # Picks the new automation(s) up immediately — no restart needed
-        # for this part, same as any automation created through the UI editor.
+    if not seeded:
+        return
+
+    # Best-effort: this is purely to make a newly-seeded automation live
+    # immediately, the same convenience the UI editor gets when you save
+    # through it — not something worth failing our own async_setup_entry
+    # over. It genuinely did fail once already: on a fresh setup where the
+    # `automation` integration hadn't finished loading yet (we didn't
+    # declare it as a manifest dependency), `automation.reload` wasn't
+    # registered yet, and letting ServiceNotFound propagate here took the
+    # ENTIRE bridge config entry down with it — every platform, the HTTP
+    # API, everything — over a nice-to-have. The file write above already
+    # succeeded regardless, so the seeded automation(s) will be picked up
+    # on the very next restart no matter what happens here.
+    try:
         await hass.services.async_call("automation", "reload")
+    except HomeAssistantError as err:
+        _LOGGER.warning(
+            "Seeded automation(s) will take effect on the next restart instead of immediately: %s", err
+        )

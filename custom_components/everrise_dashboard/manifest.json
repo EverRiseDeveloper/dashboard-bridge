@@ -2,11 +2,11 @@
   "domain": "everrise_dashboard",
   "name": "Everrise Dashboard Config Bridge",
   "config_flow": true,
-  "dependencies": ["panel_custom"],
+  "dependencies": ["panel_custom", "automation"],
   "documentation": "https://github.com/EverRiseDeveloper/dashboard-bridge",
   "issue_tracker": "https://github.com/EverRiseDeveloper/dashboard-bridge/issues",
   "codeowners": ["@EverRiseDeveloper"],
-  "version": "0.6.0",
+  "version": "0.6.1",
   "requirements": [],
   "iot_class": "local_push"
 }
