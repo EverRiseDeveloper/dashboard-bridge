@@ -41,7 +41,7 @@ def www_dir(hass: HomeAssistant) -> Path:
     return Path(hass.config.path("www", WWW_SUBFOLDER))
 
 
-def _read_local_build_id(path: Path) -> str | None:
+def _read_local_version(path: Path) -> str | None:
     version_file = path / "version.json"
     if not version_file.exists():
         return None
@@ -49,18 +49,20 @@ def _read_local_build_id(path: Path) -> str | None:
         data = json.loads(version_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    build_id = data.get("buildId")
-    return str(build_id) if build_id is not None else None
+    version = data.get("version")
+    return str(version) if version is not None else None
 
 
-async def get_installed_build_id(hass: HomeAssistant) -> str | None:
-    """The build currently sitting in www/ — None if nothing's deployed yet
-    (a bare bridge install, before the first bootstrap install completes)."""
-    return await hass.async_add_executor_job(_read_local_build_id, www_dir(hass))
+async def get_installed_version(hass: HomeAssistant) -> str | None:
+    """The version currently sitting in www/ — None if nothing's deployed
+    yet (a bare bridge install, before the first bootstrap install
+    completes). A semver string (e.g. "1.2.3"), matching dashboard's own
+    package.json — see vite.config.ts."""
+    return await hass.async_add_executor_job(_read_local_version, www_dir(hass))
 
 
-async def get_latest_build_id(hass: HomeAssistant) -> str | None:
-    """The newest build published to dashboard-dist. A small, single-file
+async def get_latest_version(hass: HomeAssistant) -> str | None:
+    """The newest version published to dashboard-dist. A small, single-file
     fetch — cheap enough to call on every periodic check without pulling
     down the whole build just to compare versions."""
     session = async_get_clientsession(hass)
@@ -75,8 +77,8 @@ async def get_latest_build_id(hass: HomeAssistant) -> str | None:
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
         _LOGGER.debug("Couldn't check for a new dashboard build: %s", err)
         return None
-    build_id = data.get("buildId") if isinstance(data, dict) else None
-    return str(build_id) if build_id is not None else None
+    version = data.get("version") if isinstance(data, dict) else None
+    return str(version) if version is not None else None
 
 
 def _extract_tarball(archive_path: Path, target: Path) -> None:
