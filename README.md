@@ -1,7 +1,7 @@
 # Everrise Dashboard Config Bridge
 
 A small Home Assistant custom integration that exposes an **authenticated**
-read/write API for the [Everrise Dashboard](https://github.com/Hakim2014/everrise-dashboard)'s
+read/write API for the [Everrise Dashboard](https://github.com/EverRiseDeveloper/dashboard)'s
 `config.json` — the file that defines every room, camera, entity, and
 threshold the dashboard uses.
 
@@ -21,7 +21,7 @@ of Home Assistant. Writes additionally require an admin account.
 ### Via HACS (custom repository)
 
 1. HACS → the "⋮" menu (top right) → **Custom repositories**.
-2. Add `https://github.com/Hakim2014/everrise-dashboard-bridge`, category **Integration**.
+2. Add `https://github.com/EverRiseDeveloper/dashboard-bridge`, category **Integration**.
 3. Install "Everrise Dashboard Config Bridge", restart Home Assistant.
 
 ### Manual
