@@ -6,6 +6,7 @@ import json
 import logging
 from pathlib import Path
 
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -31,11 +32,31 @@ _LOGGER = logging.getLogger(__name__)
 # Home Assistant hands it the current user's already-live `hass.connection`
 # / `hass.auth` directly (see the frontend's src/panel.tsx).
 #
-# The JS module is served from the same www/ folder the main dashboard app
-# already deploys to via `npm run build:ha` — vite.config.ts builds it as a
-# second, fixed-filename entry point (not content-hashed, since this path
-# is referenced literally here rather than through a generated index.html).
-PANEL_JS_URL = "/local/everrise-dashboard/panel.js"
+# [FIXED — see STATIC_URL_PREFIX below] This used to be served at
+# `/local/everrise-dashboard/panel.js`, piggybacking on the `frontend`
+# component's own generic `/local` -> `config/www` mapping. That mapping is
+# only registered by `frontend`'s *own* async_setup, and only if the `www/`
+# folder already exists AT THAT MOMENT in the boot sequence
+# (developers.home-assistant.io / community threads on "files added to
+# www/ after startup 404 until a restart" — this is a well-known HA
+# behavior, not specific to this integration). On a brand new client box,
+# `www/everrise-dashboard/` doesn't exist yet the first time this
+# integration's own async_setup_entry runs (which is what
+# _bootstrap_frontend_if_missing below uses to create it and download the
+# build) — so `/local/...` was never wired up for it during that same boot,
+# and every fresh install hit a genuine, reproducible 404 on panel.js /
+# version.json even though the files were sitting right there on disk
+# (confirmed against a real client box: files present over Samba, 404 from
+# curl on both `panel.js` and `version.json`, restarting Core fixed it).
+#
+# The real fix is to stop depending on `frontend`'s lazy, boot-order-
+# sensitive mapping entirely: register our own static path explicitly,
+# every time this integration sets up (see the async_register_static_paths
+# call below). That's a dynamic aiohttp route registration, not gated on
+# boot order the way `frontend`'s is — it works whether www/ was just
+# created a second ago or has existed for months, and needs no restart.
+STATIC_URL_PREFIX = "/everrise_dashboard_static"
+PANEL_JS_URL = f"{STATIC_URL_PREFIX}/panel.js"
 PANEL_WEBCOMPONENT_NAME = "everrise-dashboard-panel"
 PANEL_URL_PATH = "everrise"
 
@@ -85,12 +106,32 @@ async def _bootstrap_frontend_if_missing(hass: HomeAssistant) -> None:
         )
 
 
+async def _register_static_path_if_missing(hass: HomeAssistant) -> None:
+    """See the long comment on STATIC_URL_PREFIX above for why this exists
+    instead of just relying on `frontend`'s `/local` mapping. Registering
+    this is cheap and idempotent-guarded the same way as the HTTP view and
+    panel below; the target directory is created up front (even if empty)
+    because aiohttp's static route needs the path to exist at registration
+    time — _bootstrap_frontend_if_missing (or the Update entity later)
+    fills it with real files afterward, and this route serves whatever's
+    there on each request, not a snapshot taken at registration."""
+    if hass.data[DOMAIN].get("static_path_registered"):
+        return
+    target = www_dir(hass)
+    await hass.async_add_executor_job(lambda: target.mkdir(parents=True, exist_ok=True))
+    await hass.http.async_register_static_paths(
+        [StaticPathConfig(STATIC_URL_PREFIX, str(target), False)]
+    )
+    hass.data[DOMAIN]["static_path_registered"] = True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
     folder = entry.options.get(CONF_FOLDER, DEFAULT_FOLDER)
     filename = entry.options.get(CONF_FILENAME, DEFAULT_FILENAME)
     await hass.async_add_executor_job(_seed_default_config_if_missing, hass, folder, filename)
+    await _register_static_path_if_missing(hass)
     await _bootstrap_frontend_if_missing(hass)
     await async_seed_restart_automation_if_missing(hass)
 
@@ -136,9 +177,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    # The HTTP view and panel registration stay in place regardless (see
-    # notes above — there's no "unregister" for either), but the Update
-    # entity platform does need a normal unload.
+    # The HTTP view, static path, and panel registration all stay in place
+    # regardless (see notes above — there's no "unregister" for any of
+    # them), but the Update entity platform does need a normal unload.
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
