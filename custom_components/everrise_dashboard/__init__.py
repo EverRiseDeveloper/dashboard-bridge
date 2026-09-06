@@ -27,7 +27,7 @@ from .http import DashboardConfigView
 from .restart_automation import async_seed_restart_automation_if_missing
 from .storage import resolve_config_path, write_json_atomic
 
-PLATFORMS: list[Platform] = [Platform.UPDATE, Platform.BINARY_SENSOR]
+PLATFORMS: list[Platform] = [Platform.UPDATE, Platform.BINARY_SENSOR, Platform.SENSOR]
 
 _LOGGER = logging.getLogger(__name__)
 
