@@ -4,9 +4,15 @@ DOMAIN = "everrise_dashboard"
 
 CONF_FOLDER = "folder"
 CONF_FILENAME = "filename"
+CONF_SET_DEFAULT_PANEL = "set_default_panel"
 
 DEFAULT_FOLDER = "everrise-dashboard"
 DEFAULT_FILENAME = "config.json"
+# On by default: for an EverRise install, landing the household in the
+# EverRise dashboard rather than Home Assistant's own overview is the whole
+# point. Untick it in the setup form (or later under Configure) for an
+# install that should keep HA's own landing page. See default_panel.py.
+DEFAULT_SET_DEFAULT_PANEL = True
 
 # A single path segment only — no "/", "..", or drive letters. Enforced both
 # at config_flow submission time and again at request time (defense in

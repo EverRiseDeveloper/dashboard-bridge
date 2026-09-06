@@ -36,6 +36,37 @@ Dashboard Config Bridge". Most installs can accept the defaults (folder
 `everrise-dashboard`, filename `config.json`) — only change these if a
 particular client's dashboard was deployed under a different folder name.
 
+## Landing page
+
+The integration registers the dashboard as a native Home Assistant panel at
+`/everrise` — a `panel_custom` panel, **not** an iframe. Home Assistant hands
+it the current user's already-authenticated `hass.connection` / `hass.auth`,
+so there is no second browsing context, no separate login, and no token to
+obtain.
+
+On setup it also makes that panel the page Home Assistant **opens on**, so a
+client lands in the EverRise dashboard the moment they open the Companion app
+— iPhone, iPad, Android phone, Android tablet, and any browser. All of those
+render the same Home Assistant frontend, so this is one instance-level
+setting rather than per-device configuration.
+
+It writes the same `default_panel` field Home Assistant's own UI writes
+(Settings → Dashboards → "Set as default", and the per-user picker under
+Profile → Dashboard). Those pickers only *list* Lovelace dashboards, but the
+frontend resolves the stored value against every registered panel, so a
+`panel_custom` panel is a valid value there.
+
+- On Home Assistant versions with frontend **system** data, one write covers
+  every user on the install, including users created later. A household
+  member can still override it for themselves under Profile → Dashboard.
+- On older versions it falls back to writing each existing user's own
+  setting, skipping anyone who has already chosen a landing page. Users added
+  after setup aren't covered on that path — reload the integration to pick
+  them up.
+
+Untick **"Open Home Assistant on the EverRise dashboard"** during setup, or
+later under the integration's *Configure*, to leave the landing page alone.
+
 ## First-time migration
 
 If you already have a `config.json` at

@@ -6,7 +6,8 @@
         "description": "Exposes an authenticated read/write API for your Everrise Dashboard's config.json, so the dashboard's Admin page can edit it instead of hand-editing the file. Most installs can leave the defaults as-is.",
         "data": {
           "folder": "Dashboard folder name (under config/www/)",
-          "filename": "Config filename"
+          "filename": "Config filename",
+          "set_default_panel": "Open Home Assistant on the EverRise dashboard"
         }
       }
     },
@@ -24,7 +25,8 @@
         "title": "Everrise Dashboard Config Bridge options",
         "data": {
           "folder": "Dashboard folder name (under config/www/)",
-          "filename": "Config filename"
+          "filename": "Config filename",
+          "set_default_panel": "Open Home Assistant on the EverRise dashboard"
         }
       }
     },

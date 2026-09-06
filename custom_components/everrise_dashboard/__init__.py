@@ -12,7 +12,16 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_FILENAME, CONF_FOLDER, DEFAULT_FILENAME, DEFAULT_FOLDER, DOMAIN
+from .const import (
+    CONF_FILENAME,
+    CONF_FOLDER,
+    CONF_SET_DEFAULT_PANEL,
+    DEFAULT_FILENAME,
+    DEFAULT_FOLDER,
+    DEFAULT_SET_DEFAULT_PANEL,
+    DOMAIN,
+)
+from .default_panel import async_apply_default_panel
 from .frontend_updater import install_latest, www_dir
 from .http import DashboardConfigView
 from .restart_automation import async_seed_restart_automation_if_missing
@@ -170,6 +179,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.debug("Panel %s was already registered", PANEL_URL_PATH)
         hass.data[DOMAIN]["panel_registered"] = True
 
+    # Make the panel registered just above the page Home Assistant opens on,
+    # so a client lands in the EverRise dashboard the moment they open the
+    # Companion app — iPhone, iPad, Android phone, Android tablet, and any
+    # browser — with nothing to set up per device. Re-applied on every
+    # setup/reload rather than only on first install, which is what makes
+    # "reload the integration" the way to pick up newly created users on the
+    # legacy per-user path. See default_panel.py.
+    if entry.options.get(CONF_SET_DEFAULT_PANEL, DEFAULT_SET_DEFAULT_PANEL):
+        await async_apply_default_panel(hass, PANEL_URL_PATH)
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
@@ -184,7 +203,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    # Options (folder/filename) are read fresh per-request by the view, so
-    # no explicit reload action is needed here — this listener exists so
-    # HA doesn't warn about an options flow with no update handling.
-    return None
+    # The folder/filename options need nothing here — the HTTP view reads
+    # them fresh on every request. The "open on the EverRise dashboard"
+    # option does, though: it's applied during setup, so switching it on has
+    # to re-run that. A reload is the cheap way to cover it — the view,
+    # static path and panel registrations are each guarded against
+    # re-registering, so reloading is safe.
+    await hass.config_entries.async_reload(entry.entry_id)

@@ -13,8 +13,10 @@ from homeassistant.core import callback
 from .const import (
     CONF_FILENAME,
     CONF_FOLDER,
+    CONF_SET_DEFAULT_PANEL,
     DEFAULT_FILENAME,
     DEFAULT_FOLDER,
+    DEFAULT_SET_DEFAULT_PANEL,
     DOMAIN,
     FILENAME_PATTERN,
     FOLDER_PATTERN,
@@ -31,11 +33,16 @@ def _validate(folder: str, filename: str) -> dict[str, str]:
     return errors
 
 
-def _schema(folder: str = DEFAULT_FOLDER, filename: str = DEFAULT_FILENAME) -> vol.Schema:
+def _schema(
+    folder: str = DEFAULT_FOLDER,
+    filename: str = DEFAULT_FILENAME,
+    set_default_panel: bool = DEFAULT_SET_DEFAULT_PANEL,
+) -> vol.Schema:
     return vol.Schema(
         {
             vol.Optional(CONF_FOLDER, default=folder): str,
             vol.Optional(CONF_FILENAME, default=filename): str,
+            vol.Optional(CONF_SET_DEFAULT_PANEL, default=set_default_panel): bool,
         }
     )
 
@@ -60,17 +67,26 @@ class EverriseDashboardConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             folder = user_input[CONF_FOLDER].strip()
             filename = user_input[CONF_FILENAME].strip()
+            set_default_panel = user_input.get(
+                CONF_SET_DEFAULT_PANEL, DEFAULT_SET_DEFAULT_PANEL
+            )
             errors = _validate(folder, filename)
             if not errors:
                 return self.async_create_entry(
                     title=f"Everrise Dashboard ({folder})",
                     data={},
-                    options={CONF_FOLDER: folder, CONF_FILENAME: filename},
+                    options={
+                        CONF_FOLDER: folder,
+                        CONF_FILENAME: filename,
+                        CONF_SET_DEFAULT_PANEL: set_default_panel,
+                    },
                 )
             # Re-show the form with whatever the user typed, so a typo isn't
             # discarded back to the defaults.
             return self.async_show_form(
-                step_id="user", data_schema=_schema(folder, filename), errors=errors
+                step_id="user",
+                data_schema=_schema(folder, filename, set_default_panel),
+                errors=errors,
             )
 
         return self.async_show_form(step_id="user", data_schema=_schema())
@@ -95,20 +111,36 @@ class EverriseDashboardOptionsFlow(config_entries.OptionsFlow):
     ) -> config_entries.ConfigFlowResult:
         current_folder = self._entry.options.get(CONF_FOLDER, DEFAULT_FOLDER)
         current_filename = self._entry.options.get(CONF_FILENAME, DEFAULT_FILENAME)
+        current_set_default_panel = self._entry.options.get(
+            CONF_SET_DEFAULT_PANEL, DEFAULT_SET_DEFAULT_PANEL
+        )
 
         errors: dict[str, str] = {}
         if user_input is not None:
             folder = user_input[CONF_FOLDER].strip()
             filename = user_input[CONF_FILENAME].strip()
+            set_default_panel = user_input.get(
+                CONF_SET_DEFAULT_PANEL, DEFAULT_SET_DEFAULT_PANEL
+            )
             errors = _validate(folder, filename)
             if not errors:
                 return self.async_create_entry(
-                    title="", data={CONF_FOLDER: folder, CONF_FILENAME: filename}
+                    title="",
+                    data={
+                        CONF_FOLDER: folder,
+                        CONF_FILENAME: filename,
+                        CONF_SET_DEFAULT_PANEL: set_default_panel,
+                    },
                 )
             return self.async_show_form(
-                step_id="init", data_schema=_schema(folder, filename), errors=errors
+                step_id="init",
+                data_schema=_schema(folder, filename, set_default_panel),
+                errors=errors,
             )
 
         return self.async_show_form(
-            step_id="init", data_schema=_schema(current_folder, current_filename)
+            step_id="init",
+            data_schema=_schema(
+                current_folder, current_filename, current_set_default_panel
+            ),
         )
