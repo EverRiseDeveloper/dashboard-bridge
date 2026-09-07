@@ -11,7 +11,8 @@ platform and keeps the "latest known version" fresh via a DataUpdateCoordinator.
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
+from typing import Any
 
 from homeassistant.components.update import UpdateDeviceClass, UpdateEntity, UpdateEntityFeature
 from homeassistant.config_entries import ConfigEntry
@@ -19,6 +20,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
+from homeassistant.util import dt as dt_util
 
 from .const import DIST_REPO_NAME, DIST_REPO_OWNER, DOMAIN
 from .frontend_updater import get_installed_version, get_latest_version, install_latest
@@ -37,6 +39,11 @@ _LOGGER = logging.getLogger(__name__)
 # the loop instead: push a build, and it's live in www/ within minutes with
 # no one needing to touch HA at all.
 _CHECK_INTERVAL = timedelta(minutes=15)
+
+# How many consecutive failed checks before this says so in the log. One
+# blip is not worth a warning — GitHub being briefly unreachable is normal
+# — but three in a row is ~45 minutes of flying blind, which is.
+_FAILURE_WARN_AFTER = 3
 
 
 def _parse_semver(value: str) -> tuple[int, int, int] | None:
@@ -84,13 +91,53 @@ def _latest_is_newer(latest: str | None, installed: str | None) -> bool:
 
 
 class _LatestVersionCoordinator(DataUpdateCoordinator[str | None]):
-    """Polls dashboard-dist's version.json — see frontend_updater.get_latest_version."""
+    """Polls dashboard-dist's version.json — see frontend_updater.get_latest_version.
+
+    Also keeps track of WHEN a check last actually succeeded, which the
+    entity exposes as attributes. That exists because of a genuinely
+    invisible failure mode: get_latest_version() swallows every error
+    (HTTP, timeout, bad JSON) and returns None, logging only at debug.
+    None then means "not newer" to _latest_is_newer, and latest_version
+    echoes installed_version — so a box that cannot reach GitHub at all
+    reports a confident "up to date" indefinitely, with nothing above
+    debug in the log to say otherwise.
+
+    That bit us for real: a client sat on an old build for what looked like
+    far too long, and there was no way to tell "hasn't polled yet" from
+    "polling and failing every time" without reading the source. These two
+    counters make the difference observable — in the entity, in the log,
+    and in the dashboard's own Admin > About tab.
+    """
 
     def __init__(self, hass: HomeAssistant) -> None:
         super().__init__(hass, _LOGGER, name=f"{DOMAIN}_latest_version", update_interval=_CHECK_INTERVAL)
+        self.last_success: datetime | None = None
+        self.failure_streak = 0
 
     async def _async_update_data(self) -> str | None:
-        return await get_latest_version(self.hass)
+        latest = await get_latest_version(self.hass)
+
+        if latest is None:
+            self.failure_streak += 1
+            # Warn exactly once per outage (on the Nth failure, not every
+            # one after it) so a long outage doesn't fill the log.
+            if self.failure_streak == _FAILURE_WARN_AFTER:
+                _LOGGER.warning(
+                    "Couldn't check for a new dashboard build %s times in a row (~%s minutes). "
+                    "The version reported may be stale; last successful check: %s",
+                    self.failure_streak,
+                    int(self.failure_streak * _CHECK_INTERVAL.total_seconds() // 60),
+                    self.last_success.isoformat() if self.last_success else "never",
+                )
+            # Deliberately keep the last known-good value rather than
+            # returning None: dropping it would make latest_version flap
+            # back to installed_version and could re-fire the auto-install
+            # automation on the next successful poll for no reason.
+            return self.data
+
+        self.failure_streak = 0
+        self.last_success = dt_util.utcnow()
+        return latest
 
 
 async def async_setup_entry(
@@ -125,6 +172,19 @@ class EverriseDashboardUpdateEntity(CoordinatorEntity[_LatestVersionCoordinator]
     @property
     def installed_version(self) -> str | None:
         return self._installed_version
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Enough to tell "checked, genuinely up to date" apart from
+        "hasn't managed to check in hours" — see the coordinator's own
+        docstring for why that distinction wasn't visible before."""
+        return {
+            "last_successful_check": self.coordinator.last_success,
+            "failed_checks_since_success": self.coordinator.failure_streak,
+            # Published so a consumer (the About tab) can decide what
+            # counts as stale from the real interval rather than guessing.
+            "check_interval_minutes": int(_CHECK_INTERVAL.total_seconds() // 60),
+        }
 
     @property
     def latest_version(self) -> str | None:
