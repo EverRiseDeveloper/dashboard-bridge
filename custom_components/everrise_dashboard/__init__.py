@@ -21,6 +21,7 @@ from .const import (
     DEFAULT_SET_DEFAULT_PANEL,
     DOMAIN,
 )
+from .automations_http import EverriseAutomationView, EverriseAutomationsView
 from .default_panel import async_apply_default_panel
 from .frontend_updater import install_latest, www_dir
 from .http import DashboardConfigView
@@ -152,6 +153,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # though the route registration itself is a one-time thing.
     if not hass.data[DOMAIN].get("view_registered"):
         hass.http.register_view(DashboardConfigView(hass))
+        # Automation create/read/update/delete for non-admin users. Home
+        # Assistant's own automation config endpoints are admin-only with no
+        # policy that can open them to a non-admin account, and every client
+        # is non-admin — see automations_http.py and automation_policy.py.
+        hass.http.register_view(EverriseAutomationsView(hass))
+        hass.http.register_view(EverriseAutomationView(hass))
         hass.data[DOMAIN]["view_registered"] = True
 
     # Same one-time-per-process reasoning as the HTTP view above — panel
