@@ -23,7 +23,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpda
 from homeassistant.util import dt as dt_util
 
 from .const import DIST_REPO_NAME, DIST_REPO_OWNER, DOMAIN
-from .frontend_updater import get_installed_version, get_latest_version, install_latest
+from .frontend_updater import fetch_latest_version, get_installed_version, install_latest
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -91,44 +91,71 @@ def _latest_is_newer(latest: str | None, installed: str | None) -> bool:
 
 
 class _LatestVersionCoordinator(DataUpdateCoordinator[str | None]):
-    """Polls dashboard-dist's version.json — see frontend_updater.get_latest_version.
+    """Polls dashboard-dist's version.json — see frontend_updater.fetch_latest_version.
 
-    Also keeps track of WHEN a check last actually succeeded, which the
-    entity exposes as attributes. That exists because of a genuinely
-    invisible failure mode: get_latest_version() swallows every error
-    (HTTP, timeout, bad JSON) and returns None, logging only at debug.
-    None then means "not newer" to _latest_is_newer, and latest_version
+    Also keeps track of when a check was last ATTEMPTED, when one last
+    SUCCEEDED, and why the last attempt failed — all of which the entity
+    exposes as attributes. That exists because of a genuinely invisible
+    failure mode: the fetch returns None on any error (HTTP, timeout, bad
+    JSON), None means "not newer" to _latest_is_newer, and latest_version
     echoes installed_version — so a box that cannot reach GitHub at all
-    reports a confident "up to date" indefinitely, with nothing above
-    debug in the log to say otherwise.
+    reports a confident "up to date" indefinitely.
 
-    That bit us for real: a client sat on an old build for what looked like
-    far too long, and there was no way to tell "hasn't polled yet" from
-    "polling and failing every time" without reading the source. These two
-    counters make the difference observable — in the entity, in the log,
-    and in the dashboard's own Admin > About tab.
+    That bit us three times. First a client sat on an old build with no way
+    to tell "hasn't polled yet" from "polling and failing every time"; the
+    counters below fixed that. Then twice more with the counters in place,
+    because they said only THAT it failed, never why — the reason was
+    logged at debug and therefore invisible at the default level. On
+    Client_003 it turned out to be "Cannot connect to host
+    raw.githubusercontent.com:443 ssl:default [Network unreachable]",
+    which points straight at the box's own routing and would have ended
+    the investigation immediately had anyone been able to read it. So
+    fetch_latest_version now hands the reason back, it goes into the
+    warning below, and it's published as last_check_error for the
+    dashboard's Admin > About tab.
     """
 
     def __init__(self, hass: HomeAssistant) -> None:
         super().__init__(hass, _LOGGER, name=f"{DOMAIN}_latest_version", update_interval=_CHECK_INTERVAL)
         self.last_success: datetime | None = None
+        # Every ATTEMPT, unlike last_success — the two diverge precisely
+        # during an outage, which is when someone is looking. It's also
+        # what "next check at ..." has to be derived from: the coordinator
+        # reschedules _CHECK_INTERVAL after each refresh regardless of
+        # whether that refresh succeeded.
+        self.last_check: datetime | None = None
+        self.last_error: str | None = None
         self.failure_streak = 0
 
+    @property
+    def next_check(self) -> datetime | None:
+        if self.last_check is None:
+            return None
+        return self.last_check + _CHECK_INTERVAL
+
     async def _async_update_data(self) -> str | None:
-        latest = await get_latest_version(self.hass)
+        latest, error = await fetch_latest_version(self.hass)
+        self.last_check = dt_util.utcnow()
 
         if latest is None:
             self.failure_streak += 1
+            self.last_error = error
             # Warn exactly once per outage (on the Nth failure, not every
-            # one after it) so a long outage doesn't fill the log.
+            # one after it) so a long outage doesn't fill the log — but
+            # carry the reason, which used to be debug-only. "3 failed
+            # attempts" with no cause is the kind of telemetry that sends
+            # you looking at DNS for twenty minutes.
             if self.failure_streak == _FAILURE_WARN_AFTER:
                 _LOGGER.warning(
-                    "Couldn't check for a new dashboard build %s times in a row (~%s minutes). "
+                    "Couldn't check for a new dashboard build %s times in a row (~%s minutes): %s. "
                     "The version reported may be stale; last successful check: %s",
                     self.failure_streak,
                     int(self.failure_streak * _CHECK_INTERVAL.total_seconds() // 60),
+                    error or "no reason reported",
                     self.last_success.isoformat() if self.last_success else "never",
                 )
+            else:
+                _LOGGER.debug("Couldn't check for a new dashboard build: %s", error)
             # Deliberately keep the last known-good value rather than
             # returning None: dropping it would make latest_version flap
             # back to installed_version and could re-fire the auto-install
@@ -136,7 +163,8 @@ class _LatestVersionCoordinator(DataUpdateCoordinator[str | None]):
             return self.data
 
         self.failure_streak = 0
-        self.last_success = dt_util.utcnow()
+        self.last_error = None
+        self.last_success = self.last_check
         return latest
 
 
@@ -181,6 +209,18 @@ class EverriseDashboardUpdateEntity(CoordinatorEntity[_LatestVersionCoordinator]
         return {
             "last_successful_check": self.coordinator.last_success,
             "failed_checks_since_success": self.coordinator.failure_streak,
+            # last_check is every attempt and next_check is when the
+            # following one is due, so the About tab can say "next check at
+            # 17:56" instead of an ageing "checked 40 minutes ago" — which
+            # reads like the check is broken even when it's merely between
+            # polls, and says nothing at all about whether the last one
+            # worked.
+            "last_check": self.coordinator.last_check,
+            "next_check": self.coordinator.next_check,
+            # None whenever the most recent attempt succeeded, so the
+            # frontend can treat "present" as "the last check failed, and
+            # here is why".
+            "last_check_error": self.coordinator.last_error,
             # Published so a consumer (the About tab) can decide what
             # counts as stale from the real interval rather than guessing.
             "check_interval_minutes": int(_CHECK_INTERVAL.total_seconds() // 60),

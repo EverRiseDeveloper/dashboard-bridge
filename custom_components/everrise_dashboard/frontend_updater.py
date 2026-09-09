@@ -61,24 +61,53 @@ async def get_installed_version(hass: HomeAssistant) -> str | None:
     return await hass.async_add_executor_job(_read_local_version, www_dir(hass))
 
 
-async def get_latest_version(hass: HomeAssistant) -> str | None:
-    """The newest version published to dashboard-dist. A small, single-file
-    fetch — cheap enough to call on every periodic check without pulling
-    down the whole build just to compare versions."""
+async def fetch_latest_version(hass: HomeAssistant) -> tuple[str | None, str | None]:
+    """The newest version published to dashboard-dist, as
+    ``(version, error)`` — exactly one of the two is ever set.
+
+    A small, single-file fetch — cheap enough to call on every periodic
+    check without pulling down the whole build just to compare versions.
+
+    The error is RETURNED rather than only logged, because logging it here
+    was actively misleading in practice. This function used to swallow
+    every failure at ``_LOGGER.debug`` and return ``None``, and ``None``
+    means "nothing newer" to the caller — so a box that could not reach
+    GitHub at all reported a confident, permanently stale "up to date",
+    and the only record of why sat below the default log level. That cost
+    real time twice: once chasing a stalled check on the dev box, and
+    again on Client_003, where the reason turned out to be
+    ``Cannot connect to host raw.githubusercontent.com:443 ssl:default
+    [Network unreachable]`` — visible only after turning debug on by hand
+    and waiting out a 15-minute poll. Handing the reason back lets the
+    coordinator put it in the warning it already logs, and publish it as
+    an entity attribute so the dashboard's own About tab can show it.
+    """
     session = async_get_clientsession(hass)
     try:
         async with session.get(
             f"{DIST_VERSION_URL}?_={uuid4().hex}", timeout=_VERSION_FETCH_TIMEOUT
         ) as resp:
             if resp.status != 200:
-                _LOGGER.debug("version.json fetch returned HTTP %s", resp.status)
-                return None
+                return None, f"GitHub answered HTTP {resp.status}"
             data = await resp.json(content_type=None)
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
-        _LOGGER.debug("Couldn't check for a new dashboard build: %s", err)
-        return None
+        # str(err) on an aiohttp connector error already reads well enough
+        # to put in front of an installer ("Cannot connect to host ...
+        # [Network unreachable]"). asyncio.TimeoutError stringifies to ""
+        # though, so name it explicitly rather than surfacing a blank.
+        if isinstance(err, asyncio.TimeoutError):
+            reason = (
+                f"Timed out after {int(_VERSION_FETCH_TIMEOUT.total or 0)}s "
+                "waiting for raw.githubusercontent.com"
+            )
+        else:
+            reason = str(err) or err.__class__.__name__
+        return None, reason
     version = data.get("version") if isinstance(data, dict) else None
-    return str(version) if version is not None else None
+    if version is None:
+        return None, "version.json had no \"version\" field"
+    return str(version), None
+
 
 
 def _extract_tarball(archive_path: Path, target: Path) -> None:
