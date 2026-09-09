@@ -117,6 +117,14 @@ ALLOWED_MODES = frozenset({"single", "restart"})
 # the folder the dashboard serves its own event snapshots from.
 SNAPSHOT_DIR_PREFIX = "/config/www/everrise-dashboard/events/"
 
+# Ceiling on a "keep reminding until it changes back" loop. The builder
+# offers up to 60; this is the backstop for a payload that did not come
+# from the builder. An uncapped or absurd loop is the one thing in this
+# feature that could genuinely harm a household — a stuck sensor with no
+# ceiling means a speaker announcing every two minutes until someone pulls
+# its plug — so `count` is REQUIRED here, not merely respected.
+MAX_REPEAT_COUNT = 60
+
 # The one automation-level variable the builder emits (the shared timestamp
 # behind a snapshot's filename and the notification's image URL).
 ALLOWED_VARIABLE_NAMES = frozenset({"everrise_snap_ts"})
@@ -144,10 +152,63 @@ def is_client_owned_id(automation_id: Any) -> bool:
     )
 
 
-def _check_action(action: Any, index: int, errors: list[str]) -> None:
-    where = f"actions[{index}]"
+def _check_repeat(action: dict, where: str, errors: list[str]) -> None:
+    """A bounded reminder loop: repeat with a mandatory count, whose
+    sequence is a state condition, one allowed action, and a delay."""
+    extra = set(action) - {"repeat"}
+    if extra:
+        errors.append(f"{where} mixes a repeat with unexpected keys: {sorted(extra)}")
+
+    repeat = action.get("repeat")
+    if not isinstance(repeat, dict):
+        errors.append(f"{where}.repeat is not an object")
+        return
+
+    unexpected = set(repeat) - {"count", "sequence"}
+    if unexpected:
+        # `while` and `until` are refused outright: capping either needs a
+        # {{ repeat.index }} template, and templates are exactly what this
+        # allowlist exists to keep out. `count` gets the same behaviour
+        # with no templating (see wrapInRepeat in the dashboard's
+        # automations.ts).
+        errors.append(f"{where}.repeat may only use count and sequence, not {sorted(unexpected)}")
+
+    count = repeat.get("count")
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+        errors.append(f"{where}.repeat.count must be a positive whole number")
+    elif count > MAX_REPEAT_COUNT:
+        errors.append(f"{where}.repeat.count may not exceed {MAX_REPEAT_COUNT}")
+
+    sequence = repeat.get("sequence")
+    if not isinstance(sequence, list) or not sequence:
+        errors.append(f"{where}.repeat.sequence must be a non-empty list")
+        return
+    for i, step in enumerate(sequence):
+        _check_action(step, f"{index_label(where)}.repeat.sequence[{i}]", errors)
+
+
+def index_label(where: str) -> str:
+    """Keeps nested error paths readable, e.g. actions[0].repeat.sequence[1]."""
+    return where
+
+
+def _check_action(action: Any, index: int | str, errors: list[str]) -> None:
+    where = f"actions[{index}]" if isinstance(index, int) else index
     if not isinstance(action, dict):
         errors.append(f"{where} is not an object")
+        return
+
+    if "repeat" in action:
+        _check_repeat(action, where, errors)
+        return
+
+    # A bare condition inside a sequence — how a reminder loop stops early
+    # once the door reads closed. Restricted to the same condition types
+    # allowed at the automation level.
+    if "condition" in action and "action" not in action:
+        kind = action.get("condition")
+        if kind not in ALLOWED_CONDITIONS:
+            errors.append(f"{where} uses condition '{kind}', which clients may not use")
         return
 
     # A delay block carries no `action` key at all.
