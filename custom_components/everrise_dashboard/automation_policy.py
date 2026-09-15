@@ -192,10 +192,58 @@ def index_label(where: str) -> str:
     return where
 
 
+def _check_choose(action: dict, where: str, errors: list[str]) -> None:
+    """A per-action "only if": choose with a single branch whose conditions
+    gate a one-step sequence containing the (possibly repeat-wrapped) action
+    itself. Mirrors buildAutomationConfig's choose wrapper in the
+    dashboard's automations.ts — that function always emits exactly one
+    branch with only conditions/sequence, so anything else did not come
+    from the builder."""
+    extra = set(action) - {"choose"}
+    if extra:
+        errors.append(f"{where} mixes a choose with unexpected keys: {sorted(extra)}")
+
+    branches = action.get("choose")
+    if not isinstance(branches, list) or len(branches) != 1:
+        errors.append(f"{where}.choose must be a list with exactly one branch")
+        return
+
+    branch = branches[0]
+    if not isinstance(branch, dict):
+        errors.append(f"{where}.choose[0] is not an object")
+        return
+
+    unexpected = set(branch) - {"conditions", "sequence"}
+    if unexpected:
+        errors.append(f"{where}.choose[0] may only use conditions and sequence, not {sorted(unexpected)}")
+
+    conditions = branch.get("conditions")
+    if not isinstance(conditions, list) or not conditions:
+        errors.append(f"{where}.choose[0].conditions must be a non-empty list")
+    else:
+        for i, condition in enumerate(conditions):
+            if not isinstance(condition, dict):
+                errors.append(f"{where}.choose[0].conditions[{i}] is not an object")
+                continue
+            kind = condition.get("condition")
+            if kind not in ALLOWED_CONDITIONS:
+                errors.append(f"{where}.choose[0].conditions[{i}] uses '{kind}', which clients may not use")
+
+    sequence = branch.get("sequence")
+    if not isinstance(sequence, list) or len(sequence) != 1:
+        errors.append(f"{where}.choose[0].sequence must be a list with exactly one step")
+        return
+    _check_action(sequence[0], f"{index_label(where)}.choose[0].sequence[0]", errors)
+
+
 def _check_action(action: Any, index: int | str, errors: list[str]) -> None:
     where = f"actions[{index}]" if isinstance(index, int) else index
     if not isinstance(action, dict):
         errors.append(f"{where} is not an object")
+        return
+
+    if "choose" in action:
+        _check_choose(action, where, errors)
         return
 
     if "repeat" in action:
