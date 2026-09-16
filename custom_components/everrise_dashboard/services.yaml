@@ -1,0 +1,51 @@
+log_notification:
+  name: Log notification
+  description: >-
+    Records a notification in the EverRise dashboard's Message Centre,
+    optionally attaching a snapshot from a camera. Call this alongside
+    notify.mobile_app_* so the household can browse notification history in
+    the dashboard, not just on the phone that received the push.
+  fields:
+    title:
+      name: Title
+      description: The notification's title, shown in the Message Centre list.
+      required: true
+      example: "Front door"
+      selector:
+        text:
+    message:
+      name: Message
+      description: The notification's body text.
+      required: true
+      example: "Motion detected at the front door"
+      selector:
+        text:
+    target:
+      name: Target
+      description: >-
+        Optional label for who/what this was about (e.g. a person or device
+        name) — shown in the Message Centre but not used for routing.
+      required: false
+      example: "Hakim's phone"
+      selector:
+        text:
+    camera_entity_id:
+      name: Camera
+      description: Optional camera to snapshot and attach to this message.
+      required: false
+      selector:
+        entity:
+          domain: camera
+    notification_id:
+      name: Notification ID
+      description: >-
+        Optional. Pick the id this message is saved under, so you can point
+        a notify action's clickAction at #/messages/<this id> without
+        waiting on this service's response. Letters, numbers, underscore,
+        dot, colon and hyphen only — anything else is ignored and an id is
+        generated for you instead. Leave blank unless you need to know the
+        id ahead of time; every call still returns the id it actually used.
+      required: false
+      example: "front_door_1737012345"
+      selector:
+        text:

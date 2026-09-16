@@ -39,3 +39,12 @@ DIST_VERSION_URL = (
 DIST_TARBALL_URL = (
     f"https://codeload.github.com/{DIST_REPO_OWNER}/{DIST_REPO_NAME}/tar.gz/refs/heads/{DIST_REPO_BRANCH}"
 )
+
+# Message Centre notification history — see notifications_store.py. A
+# subfolder of base_dir(hass) (the same `config/everrise_dashboard/` root
+# config.json's own folder lives under), not of WWW_SUBFOLDER: unlike the
+# automation builder's existing snapshot-attach images, these snapshots are
+# only ever served through the authenticated API in notifications_http.py,
+# never as a public /local/ static file.
+NOTIFICATIONS_SUBDIR = "notifications"
+NOTIFICATION_RETENTION_DAYS = 30

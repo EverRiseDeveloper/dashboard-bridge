@@ -100,6 +100,13 @@ ALLOWED_ACTION_SERVICES = frozenset(
         "notify.send_message",
         "tts.speak",
         "camera.snapshot",
+        # Message Centre logging (see the dashboard-bridge repo's
+        # notifications_store.py) — a notify action's own "Show in Message
+        # Centre" option (dashboard's AutomationBuilderModal /
+        # buildLogNotificationBlock in automations.ts) compiles to this,
+        # immediately ahead of the notify.* call it's paired with. Data
+        # shape is checked below, same as camera.snapshot's filename.
+        "everrise_dashboard.log_notification",
     }
 )
 
@@ -278,6 +285,26 @@ def _check_action(action: Any, index: int | str, errors: list[str]) -> None:
         filename = (action.get("data") or {}).get("filename")
         if not isinstance(filename, str) or not filename.startswith(SNAPSHOT_DIR_PREFIX):
             errors.append(f"{where}: snapshots may only be written under {SNAPSHOT_DIR_PREFIX}")
+
+    if service == "everrise_dashboard.log_notification":
+        # Structural only, same posture as everything else here — the
+        # values themselves (notification_id above all, since it ends up
+        # part of a filesystem path server-side) are the bridge's own job
+        # to sanitize at the point it actually uses them
+        # (notifications_store.py), not something this save-time check can
+        # meaningfully verify: notification_id is typically an unrendered
+        # Jinja template string at save time (e.g. "{{ everrise_snap_ts
+        # }}_0"), not the value that will actually be used at runtime.
+        data = action.get("data")
+        if not isinstance(data, dict):
+            errors.append(f"{where}: data must be an object")
+        else:
+            unexpected = set(data) - {"title", "message", "target", "camera_entity_id", "notification_id"}
+            if unexpected:
+                errors.append(
+                    f"{where}: log_notification data may only use title/message/target/"
+                    f"camera_entity_id/notification_id, not {sorted(unexpected)}"
+                )
 
 
 def validate_client_automation(config: Any) -> list[str]:

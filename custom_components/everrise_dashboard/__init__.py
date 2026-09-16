@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import timedelta
 from pathlib import Path
 
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
+from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
     CONF_FILENAME,
@@ -20,17 +22,35 @@ from .const import (
     DEFAULT_FOLDER,
     DEFAULT_SET_DEFAULT_PANEL,
     DOMAIN,
+    NOTIFICATION_RETENTION_DAYS,
 )
 from .automations_http import EverriseAutomationView, EverriseAutomationsView
 from .default_panel import async_apply_default_panel
 from .frontend_updater import install_latest, www_dir
 from .http import DashboardConfigView
+from .notifications_http import (
+    EverriseNotificationImageView,
+    EverriseNotificationView,
+    EverriseNotificationsView,
+)
+from .notifications_store import (
+    LOG_NOTIFICATION_SCHEMA,
+    SERVICE_LOG_NOTIFICATION,
+    async_handle_log_notification,
+    async_prune_notifications,
+)
 from .restart_automation import async_sync_seeded_automations
 from .storage import resolve_config_path, write_json_atomic
 
 PLATFORMS: list[Platform] = [Platform.UPDATE, Platform.BINARY_SENSOR, Platform.SENSOR]
 
 _LOGGER = logging.getLogger(__name__)
+
+# How often the Message Centre's cleanup pass runs — see
+# notifications_store.prune_older_than. Daily is plenty for a
+# NOTIFICATION_RETENTION_DAYS-scale window; nothing time-sensitive depends
+# on the exact hour it lands on.
+NOTIFICATION_CLEANUP_INTERVAL = timedelta(hours=24)
 
 # Registers the dashboard as a native Home Assistant panel — a custom
 # element Home Assistant mounts directly into its own already-authenticated
@@ -135,6 +155,29 @@ async def _register_static_path_if_missing(hass: HomeAssistant) -> None:
     hass.data[DOMAIN]["static_path_registered"] = True
 
 
+async def _async_register_notifications_service(hass: HomeAssistant) -> None:
+    """`everrise_dashboard.log_notification` — see notifications_store.py.
+    Guarded the same one-time-per-process way as the HTTP views/panel below;
+    `async_register` itself is idempotent (a second call just replaces the
+    handler), but registering once keeps this consistent with the rest of
+    this file and avoids re-logging the "registered" debug noise on every
+    config entry reload."""
+    if hass.data[DOMAIN].get("notifications_service_registered"):
+        return
+
+    async def _handle_log_notification(call: ServiceCall) -> ServiceResponse:
+        return await async_handle_log_notification(hass, call)
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_LOG_NOTIFICATION,
+        _handle_log_notification,
+        schema=LOG_NOTIFICATION_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+    hass.data[DOMAIN]["notifications_service_registered"] = True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
 
@@ -144,6 +187,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _register_static_path_if_missing(hass)
     await _bootstrap_frontend_if_missing(hass)
     await async_sync_seeded_automations(hass)
+    await _async_register_notifications_service(hass)
 
     # The HTTP view is registered once for the lifetime of this HA process —
     # aiohttp's router has no public "unregister route" API, so re-adding or
@@ -159,6 +203,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # is non-admin — see automations_http.py and automation_policy.py.
         hass.http.register_view(EverriseAutomationsView(hass))
         hass.http.register_view(EverriseAutomationView(hass))
+        # Message Centre — read-only history of logged notifications, plus
+        # their attached snapshots if any. See notifications_http.py.
+        hass.http.register_view(EverriseNotificationsView(hass))
+        hass.http.register_view(EverriseNotificationView(hass))
+        hass.http.register_view(EverriseNotificationImageView(hass))
         hass.data[DOMAIN]["view_registered"] = True
 
     # Same one-time-per-process reasoning as the HTTP view above — panel
@@ -195,6 +244,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # legacy per-user path. See default_panel.py.
     if entry.options.get(CONF_SET_DEFAULT_PANEL, DEFAULT_SET_DEFAULT_PANEL):
         await async_apply_default_panel(hass, PANEL_URL_PATH)
+
+    # Message Centre cleanup — prunes notifications (and their snapshot
+    # files) older than NOTIFICATION_RETENTION_DAYS. Runs once now (so an
+    # upgrade doesn't wait up to a full day for its first pass) and then on
+    # NOTIFICATION_CLEANUP_INTERVAL for as long as this entry is loaded;
+    # async_on_unload cancels it on unload/reload so entries can't pile up
+    # duplicate timers the way the one-time view/panel registrations above
+    # have to guard against manually.
+    async def _prune_notifications(_now=None) -> None:
+        removed = await async_prune_notifications(hass, NOTIFICATION_RETENTION_DAYS)
+        if removed:
+            _LOGGER.info(
+                "Pruned %d notification(s) older than %d days from the Message Centre",
+                removed,
+                NOTIFICATION_RETENTION_DAYS,
+            )
+
+    hass.async_create_task(_prune_notifications())
+    entry.async_on_unload(
+        async_track_time_interval(hass, _prune_notifications, NOTIFICATION_CLEANUP_INTERVAL)
+    )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
