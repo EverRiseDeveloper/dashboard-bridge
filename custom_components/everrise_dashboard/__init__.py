@@ -41,6 +41,7 @@ from .notifications_store import (
 )
 from .restart_automation import async_sync_seeded_automations
 from .storage import resolve_config_path, write_json_atomic
+from .tailscale_http import TailscaleLoginUrlView, TailscaleStatusView
 
 PLATFORMS: list[Platform] = [Platform.UPDATE, Platform.BINARY_SENSOR, Platform.SENSOR]
 
@@ -208,6 +209,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.http.register_view(EverriseNotificationsView(hass))
         hass.http.register_view(EverriseNotificationView(hass))
         hass.http.register_view(EverriseNotificationImageView(hass))
+        # Tailscale onboarding — a login URL to open, and a stateless,
+        # log-derived status check (no stored helper entity — see
+        # tailscale_http.py).
+        hass.http.register_view(TailscaleLoginUrlView(hass))
+        hass.http.register_view(TailscaleStatusView(hass))
         hass.data[DOMAIN]["view_registered"] = True
 
     # Same one-time-per-process reasoning as the HTTP view above — panel
