@@ -13,4 +13,4 @@ the previous release's notes, so don't forget to update it.
 -->
 
 - 
-This is to test the latest release notes implementation for the customer. Please ignore this release notes
+ Laid groundwork for an upcoming feature that will let you check for app updates directly from your dashboard, see what's changed, and choose when to install — nothing changes for you in this release.

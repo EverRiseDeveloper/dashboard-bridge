@@ -24,6 +24,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import DIST_REPO_NAME, DIST_REPO_OWNER, DOMAIN
 from .frontend_updater import fetch_latest_version, get_installed_version, install_latest
+from .version_compare import latest_is_newer
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,50 +47,6 @@ _CHECK_INTERVAL = timedelta(minutes=15)
 _FAILURE_WARN_AFTER = 3
 
 
-def _parse_semver(value: str) -> tuple[int, int, int] | None:
-    """Parses a plain "MAJOR.MINOR.PATCH" string (an optional leading "v"
-    is tolerated) into a comparable tuple — matches dashboard's own
-    package.json version field (see vite.config.ts), which is what actually
-    ends up in version.json. Doesn't attempt to handle pre-release/build
-    metadata suffixes (e.g. "1.2.0-beta.1") — we control both ends of this
-    version string, so it's kept to the simple three-number form on
-    purpose. Anything else (unparseable, wrong number of parts) returns
-    None rather than guessing, so callers can fall back to a safe default."""
-    text = value[1:] if value[:1] in ("v", "V") else value
-    parts = text.split(".")
-    if len(parts) != 3:
-        return None
-    try:
-        major, minor, patch = (int(part) for part in parts)
-    except ValueError:
-        return None
-    return (major, minor, patch)
-
-
-def _latest_is_newer(latest: str | None, installed: str | None) -> bool:
-    """Nothing installed yet (a fresh bootstrap that hasn't succeeded) still
-    counts as "newer" so the Install button remains a manual retry path.
-    Otherwise, parse both as semver and compare numerically — a plain
-    string inequality would flag "update available" even when a *stale*
-    read of dashboard-dist's version.json reports an OLDER release than
-    what's already installed (raw.githubusercontent.com caches that file
-    for a few minutes, more so right after deploy-dist.yml's force-push),
-    which showed up in practice as a confusing "Update available" that
-    installed nothing new because there was nothing new to install. Falls
-    back to simple inequality only if either string doesn't parse as
-    semver — shouldn't happen since both come from the same package.json,
-    but don't silently hide a real update over a malformed value."""
-    if installed is None:
-        return latest is not None
-    if latest is None:
-        return False
-    latest_tuple = _parse_semver(latest)
-    installed_tuple = _parse_semver(installed)
-    if latest_tuple is not None and installed_tuple is not None:
-        return latest_tuple > installed_tuple
-    return latest != installed
-
-
 class _LatestVersionCoordinator(DataUpdateCoordinator[str | None]):
     """Polls dashboard-dist's version.json — see frontend_updater.fetch_latest_version.
 
@@ -97,7 +54,7 @@ class _LatestVersionCoordinator(DataUpdateCoordinator[str | None]):
     SUCCEEDED, and why the last attempt failed — all of which the entity
     exposes as attributes. That exists because of a genuinely invisible
     failure mode: the fetch returns None on any error (HTTP, timeout, bad
-    JSON), None means "not newer" to _latest_is_newer, and latest_version
+    JSON), None means "not newer" to latest_is_newer, and latest_version
     echoes installed_version — so a box that cannot reach GitHub at all
     reports a confident "up to date" indefinitely.
 
@@ -229,7 +186,7 @@ class EverriseDashboardUpdateEntity(CoordinatorEntity[_LatestVersionCoordinator]
     @property
     def latest_version(self) -> str | None:
         latest = self.coordinator.data
-        if _latest_is_newer(latest, self._installed_version):
+        if latest_is_newer(latest, self._installed_version):
             return latest
         # Not actually newer than what's installed (or nothing to compare
         # yet) — echo the installed version so HA reports "up to date"

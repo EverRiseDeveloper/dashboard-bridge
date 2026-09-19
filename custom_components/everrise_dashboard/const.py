@@ -40,6 +40,27 @@ DIST_TARBALL_URL = (
     f"https://codeload.github.com/{DIST_REPO_OWNER}/{DIST_REPO_NAME}/tar.gz/refs/heads/{DIST_REPO_BRANCH}"
 )
 
+# The bridge's OWN repo — public too (HACS pulls it directly). Used by the
+# EverRise dashboard's Updates screen (update_manager.py) for its live
+# "check for updates" call — separate from DIST_VERSION_URL/DIST_TARBALL_URL
+# above, which the background frontend-only coordinator (update.py) and
+# frontend_updater.py use.
+BRIDGE_REPO_OWNER = "EverRiseDeveloper"
+BRIDGE_REPO_NAME = "dashboard-bridge"
+
+# GitHub's Releases API, not raw.githubusercontent.com/codeload — the
+# Updates screen needs the release NOTES (the "body" field), not just a
+# version number, and only the Releases API carries those. Both repos are
+# public, so these are unauthenticated GETs; well within GitHub's
+# unauthenticated rate limit for a single customer clicking "Check for
+# updates" by hand.
+BRIDGE_RELEASES_LATEST_URL = (
+    f"https://api.github.com/repos/{BRIDGE_REPO_OWNER}/{BRIDGE_REPO_NAME}/releases/latest"
+)
+DIST_RELEASES_LATEST_URL = (
+    f"https://api.github.com/repos/{DIST_REPO_OWNER}/{DIST_REPO_NAME}/releases/latest"
+)
+
 # Message Centre notification history — see notifications_store.py. A
 # subfolder of base_dir(hass) (the same `config/everrise_dashboard/` root
 # config.json's own folder lives under), not of WWW_SUBFOLDER: unlike the
