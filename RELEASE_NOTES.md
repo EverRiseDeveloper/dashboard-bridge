@@ -1,1 +1,1 @@
-Added the ability for the dashboard to record when someone in the house approves installing an app update — including who approved it and when. This is still backend groundwork for the upcoming Updates screen; nothing changes for you in this release yet.
+You can now approve and install updates for both the backend and the dashboard directly from the dashboard's new Updates screen — no separate updater add-on required any more. If the backend needs a restart to finish, you'll be asked before Home Assistant restarts.
