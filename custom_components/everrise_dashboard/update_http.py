@@ -1,8 +1,7 @@
 """Authenticated HTTP API for the EverRise dashboard's own Updates screen.
 
-Check and accept endpoints so far — install/restart are a later phase (see
-the update-consent project plan). Same HomeAssistantView pattern as
-http.py/tailscale_http.py.
+Check, accept, install, and restart endpoints. Same HomeAssistantView
+pattern as http.py/tailscale_http.py.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from .update_consent import record_consent
-from .update_manager import check_for_updates
+from .update_manager import check_for_updates, install_updates
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -106,3 +105,67 @@ class EverriseUpdateAcceptView(HomeAssistantView):
             )
         )
         return self.json({"success": True, "consent": entry})
+
+
+class EverriseUpdateInstallView(HomeAssistantView):
+    """POST — installs whichever side(s) currently qualify: a newer
+    release genuinely available AND the most recent recorded consent for
+    that side names exactly that version (see update_manager.install_updates
+    for the full gating logic and why the second condition exists).
+
+    Deliberately NO admin gate, same reasoning as EverriseUpdateAcceptView
+    above — any authenticated household member can trigger an install of a
+    version already consented to by someone in the household; this doesn't
+    grant any new authority beyond what the accept endpoint already
+    recorded.
+
+    Re-checks GitHub live before installing anything (never trusts a
+    cached/earlier check) and never installs a side that doesn't qualify —
+    if neither side does, this returns a normal success response saying so,
+    not an error.
+    """
+
+    url = "/api/everrise_dashboard/updates/install"
+    name = "api:everrise_dashboard:updates:install"
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass_user = request.get("hass_user")
+        if hass_user is None:
+            return self.json_message("Not authenticated.", HTTPStatus.UNAUTHORIZED)
+
+        result = await install_updates(self._hass)
+        if not result.get("success"):
+            # 502: same reasoning as the check endpoint — this view's own
+            # logic didn't fail, the live GitHub re-check inside it did.
+            return self.json(result, status_code=HTTPStatus.BAD_GATEWAY)
+        return self.json(result)
+
+
+class EverriseUpdateRestartView(HomeAssistantView):
+    """POST — restarts Home Assistant to finish an install that flagged
+    restartRequired. Fire-and-forget: responds immediately and lets the
+    restart itself happen in the background, since the HTTP response would
+    never actually make it back to the client once the process is going
+    down anyway.
+
+    Deliberately NO admin gate, same reasoning as install/accept above —
+    finishing an update any household member already consented to and
+    installed doesn't need a higher bar than starting it did.
+    """
+
+    url = "/api/everrise_dashboard/updates/restart"
+    name = "api:everrise_dashboard:updates:restart"
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def post(self, request: web.Request) -> web.Response:
+        hass_user = request.get("hass_user")
+        if hass_user is None:
+            return self.json_message("Not authenticated.", HTTPStatus.UNAUTHORIZED)
+
+        self._hass.async_create_task(self._hass.services.async_call("homeassistant", "restart"))
+        return self.json({"success": True, "message": "Restarting Home Assistant now."})

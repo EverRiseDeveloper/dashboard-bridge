@@ -29,7 +29,7 @@ import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DIST_TARBALL_URL, DIST_VERSION_URL, WWW_SUBFOLDER
+from .const import DIST_REPO_NAME, DIST_REPO_OWNER, DIST_TARBALL_URL, DIST_VERSION_URL, WWW_SUBFOLDER
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -140,13 +140,30 @@ def _extract_tarball(archive_path: Path, target: Path) -> None:
     shutil.rmtree(extract_root, ignore_errors=True)
 
 
-async def install_latest(hass: HomeAssistant) -> bool:
-    """Download dashboard-dist's current build and swap it into www/.
-    Returns True on success — used both for the first-install bootstrap
-    (__init__.py) and the Update entity's Install button (update.py)."""
+def _tarball_url_for_version(version: str) -> str:
+    """A SPECIFIC tagged release's tarball, not whatever's currently on
+    main. Used by the Updates screen's install endpoint, which must fetch
+    exactly the release a customer consented to — DIST_TARBALL_URL (main
+    branch) would risk installing a build that landed after they read the
+    notes and accepted, which they never saw or consented to."""
+    return f"https://codeload.github.com/{DIST_REPO_OWNER}/{DIST_REPO_NAME}/tar.gz/refs/tags/{version}"
+
+
+async def install_latest(hass: HomeAssistant, version: str | None = None) -> bool:
+    """Download dashboard-dist's build and swap it into www/. Returns True
+    on success.
+
+    The version argument left out (None) pulls whatever's currently on the
+    main branch — used by the bare first-install bootstrap (__init__.py)
+    and the native Update entity's Install button (update.py), neither of
+    which have a specific consented-to version to pin to. The Updates
+    screen's install endpoint (update_manager.py) always passes an
+    explicit version instead — see _tarball_url_for_version above for why
+    that distinction matters."""
     session = async_get_clientsession(hass)
     tmp_dir = Path(hass.config.path(".storage")) / f"everrise_dashboard_dl_{uuid4().hex}"
     archive_path = tmp_dir / "dashboard-dist.tar.gz"
+    tarball_url = _tarball_url_for_version(version) if version else DIST_TARBALL_URL
 
     def _make_tmp_dir() -> None:
         tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -158,7 +175,7 @@ async def install_latest(hass: HomeAssistant) -> bool:
         return False
 
     try:
-        async with session.get(DIST_TARBALL_URL, timeout=_DOWNLOAD_TIMEOUT) as resp:
+        async with session.get(tarball_url, timeout=_DOWNLOAD_TIMEOUT) as resp:
             if resp.status != 200:
                 _LOGGER.error("Downloading dashboard-dist failed: HTTP %s", resp.status)
                 return False
