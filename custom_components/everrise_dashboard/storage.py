@@ -37,11 +37,11 @@ def resolve_config_path(hass: HomeAssistant, folder: str, filename: str) -> Path
     return candidate
 
 
-def read_json(path: Path) -> dict:
+def read_json(path: Path) -> dict | list:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def write_json_atomic(path: Path, payload: dict) -> None:
+def write_json_atomic(path: Path, payload: dict | list) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp-{uuid4().hex}")
     tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

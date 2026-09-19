@@ -42,7 +42,7 @@ from .notifications_store import (
 from .restart_automation import async_sync_seeded_automations
 from .storage import resolve_config_path, write_json_atomic
 from .tailscale_http import TailscaleLoginUrlView, TailscaleStatusView
-from .update_http import EverriseUpdateCheckView
+from .update_http import EverriseUpdateAcceptView, EverriseUpdateCheckView
 
 PLATFORMS: list[Platform] = [Platform.UPDATE, Platform.BINARY_SENSOR, Platform.SENSOR]
 
@@ -216,9 +216,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.http.register_view(TailscaleLoginUrlView(hass))
         hass.http.register_view(TailscaleStatusView(hass))
         # EverRise dashboard's own Updates screen — see update_http.py.
-        # Only the check endpoint exists so far; accept/install/restart are
-        # a later phase.
+        # Check and accept exist so far; install/restart are a later phase.
         hass.http.register_view(EverriseUpdateCheckView(hass))
+        hass.http.register_view(EverriseUpdateAcceptView(hass))
         hass.data[DOMAIN]["view_registered"] = True
 
     # Same one-time-per-process reasoning as the HTTP view above — panel
