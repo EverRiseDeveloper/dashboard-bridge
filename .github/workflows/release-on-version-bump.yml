@@ -2,12 +2,23 @@ name: Publish a release on version bump
 
 # HACS's update detection is built around actual GitHub Releases, not just
 # a bumped manifest.json commit — see the incident that motivated this
-# workflow: 0.3.1 and 0.4.0 were pushed to main with the manifest bumped,
-# but HACS kept reporting 0.3.0 as the latest available version for every
-# client, because no Release ever existed for anything past 0.3.0. This
-# closes that gap: every push to main that changes manifest.json's version
-# automatically gets a matching GitHub Release, so HACS (and the 3am
-# restart-if-needed automation clients run) actually sees it.
+# workflow originally: 0.3.1 and 0.4.0 were pushed to main with the
+# manifest bumped, but HACS kept reporting 0.3.0 as the latest available
+# version for every client, because no Release ever existed for anything
+# past 0.3.0. This closes that gap: every push to main that changes
+# manifest.json's version automatically gets a matching GitHub Release —
+# which is also what the EverRise dashboard's own Updates screen reads to
+# show a customer what a pending update contains.
+#
+# Release notes come from RELEASE_NOTES.md at the repo root, NOT GitHub's
+# auto-generated commit list. Raw commit messages in this repo aren't
+# customer-facing copy (things like "Added last time check" mean nothing to
+# someone deciding whether to install an update on their house) — so write
+# RELEASE_NOTES.md for the next release before/with the version bump, in
+# the same commit or PR. This workflow refuses to publish if that file
+# still matches the previous release's notes, so a forgotten update fails
+# the build instead of silently shipping the wrong description under a new
+# version number.
 on:
   push:
     branches: [main]
@@ -46,6 +57,34 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Require RELEASE_NOTES.md
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          if [ ! -f RELEASE_NOTES.md ] || [ ! -s RELEASE_NOTES.md ]; then
+            echo "::error::RELEASE_NOTES.md is missing or empty. Write what changed in this version — for the customer reading it on the Updates screen, not for another developer — before bumping manifest.json's version."
+            exit 1
+          fi
+
+      - name: Refuse stale release notes
+        # Compares RELEASE_NOTES.md's current content against the most
+        # recently published release's body. Identical means this version
+        # bump almost certainly forgot to update the notes — publishing
+        # anyway would show a customer the PREVIOUS release's description
+        # under the NEW version number. Fail loudly instead.
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          LATEST_TAG=$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName -q '.[0].tagName // empty')
+          if [ -n "$LATEST_TAG" ]; then
+            PREVIOUS_NOTES=$(gh release view "$LATEST_TAG" --repo "${{ github.repository }}" --json body -q .body | xargs)
+            CURRENT_NOTES=$(cat RELEASE_NOTES.md | xargs)
+            if [ "$PREVIOUS_NOTES" = "$CURRENT_NOTES" ]; then
+              echo "::error::RELEASE_NOTES.md still matches $LATEST_TAG's published notes. Update it to describe what changed in ${{ steps.version.outputs.version }} before bumping the version."
+              exit 1
+            fi
+          fi
+
       - name: Publish release
         if: steps.check.outputs.exists == 'false'
         env:
@@ -55,4 +94,4 @@ jobs:
             --repo "${{ github.repository }}" \
             --target main \
             --title "${{ steps.version.outputs.version }}" \
-            --generate-notes
+            --notes-file RELEASE_NOTES.md

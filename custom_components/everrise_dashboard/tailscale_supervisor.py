@@ -22,6 +22,7 @@ worth surfacing loudly on every request.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -36,6 +37,21 @@ _LOGGER = logging.getLogger(__name__)
 _SUPERVISOR_BASE_URL = "http://supervisor"
 _REQUEST_TIMEOUT = ClientTimeout(total=10)
 
+# A Supervisor add-on restart isn't instant — confirmed against a real
+# device: from the add-on's own boot log, about 12 seconds elapsed
+# between the container starting and tailscaled printing a fresh AuthURL
+# (it calls tailscale up interactively on its own during startup, no
+# button click needed — see async_restart_tailscale_addon's docstring).
+# 45s leaves real margin over that without hanging a customer's
+# Authenticate tap indefinitely if Supervisor itself is just slow.
+_RESTART_TIMEOUT = ClientTimeout(total=45)
+
+# How long async_trigger_fresh_login_url polls the log for the restart's
+# fresh URL to show up, after the restart call itself returns: 10 tries,
+# 2s apart, comfortably past the ~12s observed in testing.
+_POLL_INTERVAL_SECONDS = 2
+_POLL_ATTEMPTS = 10
+
 # Matches this add-on's slug regardless of which repository it was
 # installed from — the human-readable name always ends in "tailscale", but
 # the leading segment is a hash of the add-on repository's URL (confirmed
@@ -44,16 +60,27 @@ _REQUEST_TIMEOUT = ClientTimeout(total=10)
 # hardcoded.
 _TAILSCALE_SLUG_SUFFIX = "_tailscale"
 
-# The URL this add-on reprints, once per pending login attempt, while the
-# device is not yet authenticated to a tailnet — confirmed against a real
-# device's log, which showed repeated blocks of
+# Fallback match for the plain, untimestamped
 #     To authenticate, visit:
 #         https://login.tailscale.com/a/<code>
-# each followed shortly by a "tailscaleUp(reauth=true) ..." retry line, on
-# a roughly 15-30 second cycle for as long as nobody completes that login.
-# Each cycle prints a DIFFERENT code — the previous one expires — so where
-# more than one match turns up in the tail, only the LAST one is current.
+# block tailscaled also prints alongside the timestamped line below — kept
+# in case a build/log format ever omits the timestamped one.
 _LOGIN_URL_RE = re.compile(r"https://login\.tailscale\.com/a/[a-zA-Z0-9]+")
+
+# The timestamped line tailscaled itself logs the moment control hands it
+# a fresh auth URL — confirmed against a real add-on restart:
+#     2026/09/18 17:46:24 control: AuthURL is https://login.tailscale.com/a/1d204523010f10
+# Preferred over _LOGIN_URL_RE above because the timestamp is a genuine
+# signal of how old this URL is, not just that a URL exists somewhere in
+# the tail — even though nothing here currently does date-math on it (see
+# async_trigger_fresh_login_url's docstring for why: Tailscale doesn't
+# publish how long this link stays valid, so rather than guess a
+# staleness threshold, the login flow always forces a fresh one).
+_TIMESTAMPED_AUTH_URL_RE = re.compile(
+    r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} control: AuthURL is "
+    r"(https://login\.tailscale\.com/a/[a-zA-Z0-9]+)",
+    re.MULTILINE,
+)
 
 # Only the tail of the log matters — the full session log can span the
 # add-on's entire uptime, and an old login attempt from hours or days ago
@@ -140,14 +167,15 @@ async def async_is_tailscale_authenticated(hass: HomeAssistant, slug: str) -> bo
     determined right now (None — no Supervisor/token, add-on not running,
     network hiccup, etc).
 
-    Heuristic, not an authoritative API — see _LOGIN_URL_RE's docstring:
-    while a login is pending, the add-on reprints a fresh login URL on a
-    tight retry cycle, so its absence from a reasonably-sized recent tail
-    of the log is a good proxy for "that loop has stopped, the device got
-    authenticated". This is exactly what the onboarding banner's "Done"
-    button triggers (see tailscale_http.py's TailscaleStatusView) — there
-    is no stored flag anywhere, so every check re-derives the answer from
-    the log fresh; the click itself is never trusted on its own.
+    Heuristic, not an authoritative API: a device that's still waiting on
+    login has an auth URL sitting in its log (from its own startup, or
+    from the restart async_trigger_fresh_login_url forces — see that
+    function), so its absence from a reasonably-sized recent tail of the
+    log is a good proxy for "already authenticated". This is exactly what
+    the onboarding banner's "Done" button triggers (see tailscale_http.py's
+    TailscaleStatusView) — there is no stored flag anywhere, so every
+    check re-derives the answer from the log fresh; the click itself is
+    never trusted on its own.
 
     Not yet validated against a real device's log all the way through a
     successful login (only the still-pending state has been observed
@@ -163,12 +191,91 @@ async def async_is_tailscale_authenticated(hass: HomeAssistant, slug: str) -> bo
 async def async_get_latest_login_url(hass: HomeAssistant, slug: str) -> str | None:
     """The most recent pending-login URL in the add-on's log, or None if
     none is found in the recent tail (either already authenticated, or the
-    add-on hasn't logged one yet). Always the LAST match, never the
-    first — each retry cycle invalidates the previous code, and the
-    dashboard's Authenticate button needs a URL that's still good the
-    moment the customer actually taps it (see tailscale_http.py)."""
+    add-on hasn't logged one yet). Prefers the timestamped
+    "control: AuthURL is ..." line (_TIMESTAMPED_AUTH_URL_RE) over the
+    plain "To authenticate, visit:" block, falling back to the latter only
+    if the former isn't present. Always the LAST match, never the first —
+    a restart invalidates whatever code came before it.
+
+    This is a passive read only — it does not itself generate a URL. The
+    dashboard's Authenticate button goes through
+    async_trigger_fresh_login_url instead, which forces a fresh one before
+    reading it back with this function."""
     tail = await _async_fetch_log_tail(hass, slug)
     if tail is None:
         return None
+    timestamped_matches = _TIMESTAMPED_AUTH_URL_RE.findall(tail)
+    if timestamped_matches:
+        return timestamped_matches[-1]
     matches = _LOGIN_URL_RE.findall(tail)
     return matches[-1] if matches else None
+
+
+async def async_restart_tailscale_addon(hass: HomeAssistant, slug: str) -> bool:
+    """Restarts the add-on via Supervisor's own, fully documented add-on
+    API — no reverse-engineered ingress session or click replication
+    needed. Confirmed against a real restart: within about 12 seconds of
+    a fresh boot, the add-on's own startup sequence calls tailscale up
+    interactively on its own and prints a brand new AuthURL to the log,
+    with no button click involved at all.
+
+    Returns False on any failure (no Supervisor/token, add-on not found,
+    Supervisor rejected the restart); callers treat that as "couldn't get
+    a fresh link right now," not a fatal error."""
+    headers = _auth_headers()
+    if headers is None:
+        return False
+
+    session = async_get_clientsession(hass)
+    try:
+        async with session.post(
+            f"{_SUPERVISOR_BASE_URL}/addons/{slug}/restart",
+            headers=headers,
+            timeout=_RESTART_TIMEOUT,
+        ) as resp:
+            if resp.status != 200:
+                _LOGGER.debug("Supervisor restart for %s returned HTTP %s", slug, resp.status)
+                return False
+    except (ClientError, TimeoutError) as err:
+        _LOGGER.debug("Couldn't restart %s via Supervisor: %s", slug, err)
+        return False
+    return True
+
+
+async def async_trigger_fresh_login_url(hass: HomeAssistant, slug: str) -> str | None:
+    """The FALLBACK path only — called from tailscale_http.py's
+    TailscaleLoginUrlView only after a plain, passive log read
+    (async_get_latest_login_url) already came up empty. Restarts the
+    add-on to force a brand new login-interactive attempt, then polls the
+    log until the fresh AuthURL line shows up.
+
+    This used to be the ONLY path (always restart, never trust whatever
+    was already in the log) — reworked after a restart it triggered live
+    left this add-on crashed in Supervisor's "error" state: its ingress
+    MagicDNS proxy failed to rebind its own tailnet IP ("Address in use")
+    right after the restart, s6 treated that as fatal and tore the whole
+    add-on down, and since this add-on ships with watchdog off, Supervisor
+    never brought it back on its own — a plain `ha addons start` on the
+    same box reproduced the identical crash minutes later, so this isn't
+    a one-off race, it's a real, repeatable risk on at least this
+    hardware/version combination. A restart is no longer the default for
+    that reason; it only runs when a passive read has nothing to work
+    with, which itself should be uncommon, since the add-on's own startup
+    sequence already prints a fresh URL automatically — a customer
+    authenticating reasonably soon after provisioning will usually find
+    one already sitting in the log with no restart needed at all.
+
+    Returns None if the restart itself failed, or if no URL showed up in
+    the log within the poll budget (_POLL_ATTEMPTS * _POLL_INTERVAL_SECONDS
+    on top of however long the restart call itself took). Callers should
+    treat a restart-triggered result as carrying real risk to the add-on
+    (see TailscaleLoginUrlView's "restarted" response field) — this
+    function does not attempt to self-heal a crash it causes."""
+    if not await async_restart_tailscale_addon(hass, slug):
+        return None
+    for _ in range(_POLL_ATTEMPTS):
+        await asyncio.sleep(_POLL_INTERVAL_SECONDS)
+        url = await async_get_latest_login_url(hass, slug)
+        if url is not None:
+            return url
+    return None

@@ -19,8 +19,8 @@ from homeassistant.core import HomeAssistant
 
 from .tailscale_supervisor import (
     async_find_tailscale_addon_slug,
-    async_get_latest_login_url,
     async_is_tailscale_authenticated,
+    async_trigger_fresh_login_url,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,11 +37,23 @@ async def _async_find_slug_or_none(hass: HomeAssistant) -> str | None:
 
 
 class TailscaleLoginUrlView(HomeAssistantView):
-    """GET the freshest pending Tailscale login URL, for the dashboard's
-    Authenticate button to open in the customer's own system browser (see
-    that component's comment on why it must NOT be embedded/iframed —
-    Google and Microsoft both refuse to complete a sign-in inside an
-    embedded webview).
+    """GET a fresh Tailscale login URL, for the dashboard's Authenticate
+    button to open in the customer's own system browser (see that
+    component's comment on why it must NOT be embedded/iframed — Google
+    and Microsoft both refuse to complete a sign-in inside an embedded
+    webview).
+
+    Actively triggers a new login attempt rather than just reading
+    whatever happens to already be in the log — see
+    async_trigger_fresh_login_url's docstring: the add-on's own startup
+    sequence is what generates this URL (no button click needed on the
+    add-on's own page at all, which is good, since that page has a known
+    bug where its own "Log In" button crashes trying to auto-open the
+    URL — see https://github.com/hassio-addons/app-tailscale/issues/52),
+    so this view forces that by restarting the add-on via Supervisor,
+    then polls the log for the fresh URL. That means this call can take
+    up to several seconds — the dashboard's banner shows a message
+    explaining the wait rather than a bare spinner.
 
     Deliberately a JSON response the frontend opens itself
     (window.open(url, '_blank')), not a server-side redirect — a redirect
@@ -65,11 +77,21 @@ class TailscaleLoginUrlView(HomeAssistantView):
                 "Tailscale add-on not found on this box.", HTTPStatus.SERVICE_UNAVAILABLE
             )
 
-        url = await async_get_latest_login_url(self._hass, slug)
+        # Skip the restart entirely if this device is already connected —
+        # both to avoid pointlessly bouncing a working connection, and
+        # because a restart wouldn't produce a login URL at all in that
+        # case (see async_is_tailscale_authenticated).
+        authenticated = await async_is_tailscale_authenticated(self._hass, slug)
+        if authenticated:
+            return self.json_message(
+                "Tailscale is already connected on this device — nothing to authenticate.",
+                HTTPStatus.CONFLICT,
+            )
+
+        url = await async_trigger_fresh_login_url(self._hass, slug)
         if url is None:
             return self.json_message(
-                "No pending Tailscale login found right now — it may already be connected, "
-                "or the add-on hasn't started yet. Try again in a few seconds.",
+                "Couldn't get a fresh Tailscale login link — try again in a moment.",
                 HTTPStatus.SERVICE_UNAVAILABLE,
             )
         return self.json({"url": url})
