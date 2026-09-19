@@ -13,3 +13,4 @@ the previous release's notes, so don't forget to update it.
 -->
 
 - 
+This is to test the latest release notes implementation for the customer. Please ignore this release notes
