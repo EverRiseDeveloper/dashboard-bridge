@@ -67,19 +67,20 @@ jobs:
 
       - name: Refuse stale release notes
         # Compares RELEASE_NOTES.md's current content against the most
-        # recently published release's body. Identical means this version
-        # bump almost certainly forgot to update the notes — publishing
-        # anyway would show a customer the PREVIOUS release's description
-        # under the NEW version number. Fail loudly instead.
+        # recently published release's body, byte-for-byte (via diff, not
+        # a shell-parsed comparison — release notes are arbitrary customer
+        # text and WILL contain apostrophes/quotes). Identical means this
+        # version bump almost certainly forgot to update the notes —
+        # publishing anyway would show a customer the PREVIOUS release's
+        # description under the NEW version number. Fail loudly instead.
         if: steps.check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           LATEST_TAG=$(gh release list --repo "${{ github.repository }}" --limit 1 --json tagName -q '.[0].tagName // empty')
           if [ -n "$LATEST_TAG" ]; then
-            PREVIOUS_NOTES=$(gh release view "$LATEST_TAG" --repo "${{ github.repository }}" --json body -q .body | xargs)
-            CURRENT_NOTES=$(cat RELEASE_NOTES.md | xargs)
-            if [ "$PREVIOUS_NOTES" = "$CURRENT_NOTES" ]; then
+            gh release view "$LATEST_TAG" --repo "${{ github.repository }}" --json body -q .body > /tmp/previous_notes.txt
+            if diff -q --ignore-trailing-space /tmp/previous_notes.txt RELEASE_NOTES.md >/dev/null; then
               echo "::error::RELEASE_NOTES.md still matches $LATEST_TAG's published notes. Update it to describe what changed in ${{ steps.version.outputs.version }} before bumping the version."
               exit 1
             fi
