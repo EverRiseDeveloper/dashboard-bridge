@@ -20,6 +20,7 @@ from homeassistant.core import HomeAssistant
 from .tailscale_supervisor import (
     async_find_tailscale_addon_slug,
     async_is_tailscale_authenticated,
+    async_maybe_apply_tailscale_external_url,
     async_trigger_fresh_login_url,
 )
 
@@ -99,17 +100,24 @@ class TailscaleLoginUrlView(HomeAssistantView):
 
 class TailscaleStatusView(HomeAssistantView):
     """GET whether Tailscale is authenticated, straight from the add-on's
-    own log — no stored state anywhere.
+    own log — nothing of its own stored anywhere.
 
     The dashboard calls this both on mount (to decide whether to show the
-    banner at all) and again after the customer taps "Done". There's
-    nothing to flip or persist: the log itself is the only source of
-    truth, so this just asks it fresh every time rather than caching the
-    answer in a helper entity that could drift from what the add-on
-    actually reports. Returns {"authenticated": false} (200, not an
-    error) for the ordinary "not yet, keep waiting" case — the banner
-    handles that by asking the customer to try again in a moment, not by
-    treating it as a failure.
+    banner at all) and again after the customer taps "Done". The
+    authenticated verdict itself has nothing to flip or persist: the log
+    is the only source of truth, so this just asks it fresh every time
+    rather than caching the answer in a helper entity that could drift
+    from what the add-on actually reports. Returns {"authenticated": false}
+    (200, not an error) for the ordinary "not yet, keep waiting" case — the
+    banner handles that by asking the customer to try again in a moment,
+    not by treating it as a failure.
+
+    One side effect on an authenticated=True result: it also gives HA's
+    own "Internet" URL a one-time default (see
+    async_maybe_apply_tailscale_external_url) if that field is still
+    empty. That's the one piece of state this view can cause to be
+    written — deliberately idempotent and non-destructive, so calling
+    this repeatedly stays safe.
     """
 
     url = "/api/everrise_dashboard/tailscale/status"
@@ -131,4 +139,10 @@ class TailscaleStatusView(HomeAssistantView):
                 "Couldn't check the Tailscale add-on's status just now — try again in a moment.",
                 HTTPStatus.SERVICE_UNAVAILABLE,
             )
+        if authenticated:
+            # Best-effort, never blocks or fails this response — see that
+            # function's docstring. Piggybacked here rather than its own
+            # endpoint since this is exactly the moment (and the only
+            # moment) the dashboard already confirms authenticated=True.
+            await async_maybe_apply_tailscale_external_url(self._hass, slug)
         return self.json({"authenticated": authenticated})

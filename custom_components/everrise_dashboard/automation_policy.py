@@ -36,6 +36,7 @@ would be a silent hole.
 
 from __future__ import annotations
 
+from pathlib import PurePosixPath
 from typing import Any
 
 # Client-built automations all carry this id prefix; it is what separates
@@ -148,6 +149,61 @@ def _service_allowed(service: str) -> bool:
     if service in ALLOWED_ACTION_SERVICES:
         return True
     return any(service.startswith(prefix) for prefix in ALLOWED_ACTION_SERVICE_PREFIXES)
+
+
+def _within_snapshot_dir(filename: str) -> bool:
+    """Whether `filename` is genuinely confined to SNAPSHOT_DIR_PREFIX once
+    `..` segments are resolved away — a plain str.startswith(prefix) check
+    (the previous version of this function) is exactly the path-traversal
+    gap notifications_http.py's image view had before it was fixed: a
+    payload like
+        "/config/www/everrise-dashboard/events/../../secrets.yaml"
+    passes a startswith check (the string literally begins with the
+    prefix) but resolves, once Home Assistant's camera.snapshot handler
+    writes it, to a file well outside that folder — and since /config as a
+    whole is typically in allowlist_external_dirs already, HA's own path
+    check does not catch this either (see SNAPSHOT_DIR_PREFIX's comment).
+    A malicious or merely malformed automation payload could use this to
+    overwrite secrets.yaml, configuration.yaml, or a .storage file with a
+    camera image, corrupting the install — the attacker can't control the
+    written bytes (they're a real camera frame), so this is a corruption/
+    DoS primitive rather than arbitrary-content write, but that's still a
+    real way to brick a client's box from a non-admin account.
+
+    Purely lexical, deliberately not touching the filesystem (this runs at
+    save time, often against a box that isn't the one that will ever
+    execute the automation, and PurePosixPath never has to exist) —
+    resolve `.`/`..` segments in the string itself and require the result
+    to still start with the prefix, the same "normalize, then check
+    containment" shape storage.py's resolve_config_path already uses for
+    config.json.
+    """
+    prefix = PurePosixPath(SNAPSHOT_DIR_PREFIX)
+    try:
+        candidate = PurePosixPath(filename)
+    except (TypeError, ValueError):
+        return False
+    if not candidate.is_absolute():
+        return False
+
+    resolved_parts: list[str] = []
+    for part in candidate.parts:
+        if part in ("/", ""):
+            continue
+        if part == ".":
+            continue
+        if part == "..":
+            if resolved_parts:
+                resolved_parts.pop()
+            continue
+        resolved_parts.append(part)
+
+    resolved = PurePosixPath("/", *resolved_parts)
+    try:
+        resolved.relative_to(prefix)
+    except ValueError:
+        return False
+    return True
 
 
 def is_client_owned_id(automation_id: Any) -> bool:
@@ -283,7 +339,7 @@ def _check_action(action: Any, index: int | str, errors: list[str]) -> None:
 
     if service == "camera.snapshot":
         filename = (action.get("data") or {}).get("filename")
-        if not isinstance(filename, str) or not filename.startswith(SNAPSHOT_DIR_PREFIX):
+        if not isinstance(filename, str) or not _within_snapshot_dir(filename):
             errors.append(f"{where}: snapshots may only be written under {SNAPSHOT_DIR_PREFIX}")
 
     if service == "everrise_dashboard.log_notification":

@@ -53,7 +53,12 @@ def record_consent(
     Callers are expected to have already validated that at least one of
     backend_version/frontend_version is set."""
     entry = {
-        "acceptedAt": dt_util.utcnow().isoformat(),
+        # HA's own configured local time (with its UTC offset kept in the
+        # string, so it's still unambiguous and sortable as text), not
+        # dt_util.utcnow() — this file gets read directly off disk as an
+        # audit trail, and a bare UTC timestamp isn't what someone
+        # eyeballing it in a client's own timezone expects to see.
+        "acceptedAt": dt_util.now().isoformat(),
         "userId": user_id,
         "userName": user_name,
         "backendVersion": backend_version,

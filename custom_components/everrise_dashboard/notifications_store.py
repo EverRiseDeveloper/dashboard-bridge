@@ -84,6 +84,19 @@ def _sanitize_notification_id(raw: Any) -> str | None:
     return None
 
 
+def is_safe_notification_id(notification_id: str) -> bool:
+    """Whether this string is safe to splice into a filesystem path -- the
+    same check _sanitize_notification_id applies before ever writing one to
+    disk. Callers that build a path from a client-supplied notification_id
+    (notifications_http.py's image view, which takes it straight from the
+    URL) must check this first: get_notification/list_notifications never
+    touch the filesystem with the raw id (they just compare it against
+    records already loaded from index.json), but image_path() does, and
+    that id there has never been through the write-time sanitizer above.
+    """
+    return _sanitize_notification_id(notification_id) is not None
+
+
 def notifications_dir(hass: HomeAssistant) -> Path:
     return base_dir(hass) / NOTIFICATIONS_SUBDIR
 

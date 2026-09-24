@@ -20,7 +20,7 @@ from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
-from .notifications_store import get_notification, image_path, list_notifications
+from .notifications_store import get_notification, image_path, is_safe_notification_id, list_notifications
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -92,6 +92,13 @@ class EverriseNotificationImageView(HomeAssistantView):
         self._hass = hass
 
     async def get(self, request: web.Request, notification_id: str) -> web.StreamResponse:
+        # notification_id comes straight off the URL here -- unlike
+        # get_notification (a plain in-memory comparison against records
+        # already loaded from index.json), this one splices it into an
+        # actual filesystem path, so it has to pass the same safe-id check
+        # notifications_store.py applies before ever writing one to disk.
+        if not is_safe_notification_id(notification_id):
+            return self.json_message("No snapshot saved for this notification.", HTTPStatus.NOT_FOUND)
         path = image_path(self._hass, notification_id)
         exists = await self._hass.async_add_executor_job(path.exists)
         if not exists:

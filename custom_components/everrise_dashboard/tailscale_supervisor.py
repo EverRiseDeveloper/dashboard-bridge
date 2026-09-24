@@ -82,6 +82,31 @@ _TIMESTAMPED_AUTH_URL_RE = re.compile(
     re.MULTILINE,
 )
 
+# Confirmed against a real successful login (live log capture, 2026-09-19):
+# once tailscaled finishes registering, it logs a state transition into
+# "Running" — tailscaled's own definitive "connected" state, not an
+# add-on-specific phrasing, so this should hold across versions:
+#     2026/09/19 21:04:13 Switching ipn state Starting -> Running (WantRunning=true, nm=true)
+# This is what async_is_tailscale_authenticated below now keys off of —
+# see that function's docstring for why the previous "is a login URL
+# absent from the tail" heuristic gave a false "still waiting" right
+# after a real successful login.
+_RUNNING_STATE_RE = re.compile(
+    r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} Switching ipn state \S+ -> Running",
+    re.MULTILINE,
+)
+
+# The add-on prints this block once `tailscale serve` picks up HA's own
+# local web server (confirmed live, same capture as _RUNNING_STATE_RE
+# above):
+#     Available within your tailnet:
+#     https://homeassistant-1.tail135c31.ts.net/
+#     |-- proxy http://127.0.0.1:80
+# This is this specific device's own MagicDNS name — used to default HA's
+# "Internet" URL (Settings > System > Network) the moment Tailscale is
+# connected, see async_maybe_apply_tailscale_external_url below.
+_TAILNET_URL_RE = re.compile(r"Available within your tailnet:\s*\n(https://\S+)")
+
 # Only the tail of the log matters — the full session log can span the
 # add-on's entire uptime, and an old login attempt from hours or days ago
 # (a customer who force-reauthed, or a first attempt nobody completed
@@ -167,25 +192,44 @@ async def async_is_tailscale_authenticated(hass: HomeAssistant, slug: str) -> bo
     determined right now (None — no Supervisor/token, add-on not running,
     network hiccup, etc).
 
-    Heuristic, not an authoritative API: a device that's still waiting on
-    login has an auth URL sitting in its log (from its own startup, or
-    from the restart async_trigger_fresh_login_url forces — see that
-    function), so its absence from a reasonably-sized recent tail of the
-    log is a good proxy for "already authenticated". This is exactly what
-    the onboarding banner's "Done" button triggers (see tailscale_http.py's
-    TailscaleStatusView) — there is no stored flag anywhere, so every
-    check re-derives the answer from the log fresh; the click itself is
-    never trusted on its own.
+    Heuristic, not an authoritative API. This used to be "is a login URL
+    absent from the tail" — but confirmed live, that gives a false
+    negative right after a real successful login: tailscaled never
+    removes the "Received auth URL: https://login.tailscale.com/a/..."
+    line from its own log once you've used it, so that URL is usually
+    still sitting in the last _LOG_TAIL_LINES lines for a while even
+    after login genuinely succeeds.
 
-    Not yet validated against a real device's log all the way through a
-    successful login (only the still-pending state has been observed
-    directly) — worth confirming the True case reads correctly once
-    tested against a real box.
+    Fixed by keying off tailscaled's own "Switching ipn state ... ->
+    Running" transition (_RUNNING_STATE_RE) instead, and — since both a
+    stale AuthURL line and a Running line can legitimately both be
+    present in the tail at once — comparing which one happened more
+    recently, same "last match, never first" rule the rest of this
+    module already follows (see async_get_latest_login_url) since a
+    restart invalidates whatever came before it. No Running line at all
+    in the tail means definitely not connected yet; a Running line with
+    no AuthURL line after it (or none at all) means authenticated; an
+    AuthURL line that comes after the last Running line means a new
+    login is pending (e.g. a forced reauth) even though an old session
+    once succeeded.
     """
     tail = await _async_fetch_log_tail(hass, slug)
     if tail is None:
         return None
-    return _LOGIN_URL_RE.search(tail) is None
+
+    last_running_end: int | None = None
+    for match in _RUNNING_STATE_RE.finditer(tail):
+        last_running_end = match.end()
+    if last_running_end is None:
+        return False
+
+    last_url_end: int | None = None
+    for match in _LOGIN_URL_RE.finditer(tail):
+        last_url_end = match.end()
+    if last_url_end is None:
+        return True
+
+    return last_running_end > last_url_end
 
 
 async def async_get_latest_login_url(hass: HomeAssistant, slug: str) -> str | None:
@@ -209,6 +253,40 @@ async def async_get_latest_login_url(hass: HomeAssistant, slug: str) -> str | No
         return timestamped_matches[-1]
     matches = _LOGIN_URL_RE.findall(tail)
     return matches[-1] if matches else None
+
+
+async def async_maybe_apply_tailscale_external_url(hass: HomeAssistant, slug: str) -> None:
+    """Best-effort: if this device is authenticated and HA's own "Internet"
+    URL (Settings > System > Network > Home Assistant URL) hasn't been set
+    to anything yet, default it to the Tailscale MagicDNS URL this add-on's
+    own log reports for itself (_TAILNET_URL_RE) — so features that read
+    hass.config.external_url (notification images, Google Assistant/Alexa,
+    casting, etc.) work the moment Tailscale is connected, without the
+    customer having to go find and paste this themselves.
+
+    Deliberately never overwrites an existing external_url — a customer
+    who already has their own domain set here (DuckDNS, Nabu Casa, a
+    router port-forward, whatever) keeps it exactly as they set it; this
+    only fills the field in when it's genuinely empty. Called from
+    tailscale_http.py's TailscaleStatusView every time that view reports
+    authenticated=True, so it self-heals on the next status check even if
+    it missed its chance the first time (e.g. the tailnet URL hadn't shown
+    up in the log tail yet)."""
+    if hass.config.external_url:
+        return
+    tail = await _async_fetch_log_tail(hass, slug)
+    if tail is None:
+        return
+    matches = _TAILNET_URL_RE.findall(tail)
+    if not matches:
+        return
+    url = matches[-1].rstrip("/")
+    try:
+        await hass.config.async_update(external_url=url)
+    except ValueError:
+        _LOGGER.debug("Tailscale URL %s rejected by Home Assistant's own URL validation", url)
+    else:
+        _LOGGER.info("Set Home Assistant's Internet URL to %s from Tailscale", url)
 
 
 async def async_restart_tailscale_addon(hass: HomeAssistant, slug: str) -> bool:
