@@ -61,6 +61,24 @@ async def get_installed_version(hass: HomeAssistant) -> str | None:
     return await hass.async_add_executor_job(_read_local_version, www_dir(hass))
 
 
+def _read_panel_cache_token(path: Path) -> str | None:
+    """A short string that changes whenever a different build lands in www/:
+    the installed version plus panel.js's modification time in
+    milliseconds. The version alone isn't enough, because a build can be
+    redeployed under the same version number; the time alone would work but
+    is unreadable in a log. None when there's no panel.js yet."""
+    try:
+        mtime_ms = (path / "panel.js").stat().st_mtime_ns // 1_000_000
+    except OSError:
+        return None
+    return f"{_read_local_version(path) or 'unknown'}-{mtime_ms}"
+
+
+async def get_panel_cache_token(hass: HomeAssistant) -> str | None:
+    """See panel_http.py — what makes each build's panel.js address unique."""
+    return await hass.async_add_executor_job(_read_panel_cache_token, www_dir(hass))
+
+
 async def fetch_latest_version(hass: HomeAssistant) -> tuple[str | None, str | None]:
     """The newest version published to dashboard-dist, as
     ``(version, error)`` — exactly one of the two is ever set.

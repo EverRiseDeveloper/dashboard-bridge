@@ -8,3 +8,6 @@
 - If an update needs a restart and nobody restarts right away, Home Assistant will restart itself overnight to finish.
 
 ## What's new
+
+- After a dashboard update, phones and tablets now open the new version straight away. Before, the Home Assistant app could keep showing the previous version until its cache was cleared by hand.
+- Home Assistant's own update notice for the dashboard no longer keeps offering a version you've already installed from the Updates screen.

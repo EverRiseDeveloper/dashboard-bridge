@@ -26,7 +26,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.loader import IntegrationNotFound, async_get_integration
 
 from .bridge_updater import install_bridge_version
-from .const import BRIDGE_RELEASES_LATEST_URL, DIST_RELEASES_LATEST_URL, DOMAIN
+from .const import BRIDGE_RELEASES_LATEST_URL, DIST_RELEASES_LATEST_URL, DOMAIN, FRONTEND_UPDATE_COORDINATOR
 from .frontend_updater import get_installed_version, install_latest as install_frontend_version
 from .update_consent import get_all_consents
 from .version_compare import latest_is_newer
@@ -163,6 +163,20 @@ async def _nudge_restart_required_sensor(hass: HomeAssistant) -> None:
         _LOGGER.debug("Couldn't nudge %s after install: %s", _RESTART_REQUIRED_ENTITY_ID, err)
 
 
+async def _refresh_frontend_update_entity(hass: HomeAssistant) -> None:
+    """Best-effort, like the restart sensor nudge above: makes HA's own
+    "Dashboard frontend" update entity re-read the version now on disk, so
+    it stops offering the build that was just installed. It would catch up
+    on its next 15-minute poll anyway."""
+    coordinator = hass.data.get(DOMAIN, {}).get(FRONTEND_UPDATE_COORDINATOR)
+    if coordinator is None:
+        return
+    try:
+        await coordinator.async_request_refresh()
+    except Exception as err:  # noqa: BLE001 - never fail the install over this
+        _LOGGER.debug("Couldn't refresh the frontend update entity after install: %s", err)
+
+
 async def install_updates(hass: HomeAssistant) -> dict[str, Any]:
     """The live install behind the Updates screen's "Install" action.
 
@@ -275,6 +289,8 @@ async def install_updates(hass: HomeAssistant) -> dict[str, Any]:
 
     if backend_result["installed"]:
         await _nudge_restart_required_sensor(hass)
+    if frontend_result["installed"]:
+        await _refresh_frontend_update_entity(hass)
 
     return {
         "success": True,

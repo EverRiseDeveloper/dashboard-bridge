@@ -16,13 +16,13 @@ from typing import Any
 
 from homeassistant.components.update import UpdateDeviceClass, UpdateEntity, UpdateEntityFeature
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity, DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .const import DIST_REPO_NAME, DIST_REPO_OWNER, DOMAIN
+from .const import DIST_REPO_NAME, DIST_REPO_OWNER, DOMAIN, FRONTEND_UPDATE_COORDINATOR
 from .frontend_updater import fetch_latest_version, get_installed_version, install_latest
 from .version_compare import latest_is_newer
 
@@ -83,6 +83,13 @@ class _LatestVersionCoordinator(DataUpdateCoordinator[str | None]):
         self.last_check: datetime | None = None
         self.last_error: str | None = None
         self.failure_streak = 0
+        # What's actually in www/ right now, re-read on every refresh. The
+        # entity used to read it only at startup and after its OWN Install
+        # button, so a build installed any other way — the dashboard's
+        # Updates screen, or files copied in by hand — left it reporting the
+        # old version as installed (and an update as available) until the
+        # next restart. Seen on Client_003 on 25 Sep 2026.
+        self.installed: str | None = None
 
     @property
     def next_check(self) -> datetime | None:
@@ -91,6 +98,9 @@ class _LatestVersionCoordinator(DataUpdateCoordinator[str | None]):
         return self.last_check + _CHECK_INTERVAL
 
     async def _async_update_data(self) -> str | None:
+        # Read before the network call, so it stays current even while
+        # GitHub is unreachable.
+        self.installed = await get_installed_version(self.hass)
         latest, error = await fetch_latest_version(self.hass)
         self.last_check = dt_util.utcnow()
 
@@ -133,6 +143,8 @@ async def async_setup_entry(
     # until the next scheduled poll, not a broken entity — GitHub being
     # briefly unreachable shouldn't block the rest of setup.
     await coordinator.async_refresh()
+    hass.data.setdefault(DOMAIN, {})[FRONTEND_UPDATE_COORDINATOR] = coordinator
+    entry.async_on_unload(lambda: hass.data.get(DOMAIN, {}).pop(FRONTEND_UPDATE_COORDINATOR, None))
     async_add_entities([EverriseDashboardUpdateEntity(hass, entry, coordinator)])
 
 
@@ -157,6 +169,14 @@ class EverriseDashboardUpdateEntity(CoordinatorEntity[_LatestVersionCoordinator]
     @property
     def installed_version(self) -> str | None:
         return self._installed_version
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        # Pick up whatever the coordinator just read from disk — see its
+        # `installed` attribute for why this can't only happen at startup.
+        if self.coordinator.installed is not None:
+            self._installed_version = self.coordinator.installed
+        super()._handle_coordinator_update()
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

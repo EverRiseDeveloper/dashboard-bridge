@@ -40,6 +40,13 @@ DIST_TARBALL_URL = (
     f"https://codeload.github.com/{DIST_REPO_OWNER}/{DIST_REPO_NAME}/tar.gz/refs/heads/{DIST_REPO_BRANCH}"
 )
 
+# hass.data[DOMAIN] key for update.py's version coordinator, so the
+# dashboard's own Updates screen (update_manager.py) can refresh it straight
+# after installing a build — otherwise HA's "Dashboard frontend" update
+# entity would keep calling the old build installed, and offer an update,
+# until its next poll.
+FRONTEND_UPDATE_COORDINATOR = "frontend_update_coordinator"
+
 # The bridge's OWN repo — public too (HACS pulls it directly). Used by the
 # EverRise dashboard's Updates screen (update_manager.py) for its live
 # "check for updates" call — separate from DIST_VERSION_URL/DIST_TARBALL_URL

@@ -39,6 +39,7 @@ from .notifications_store import (
     async_handle_log_notification,
     async_prune_notifications,
 )
+from .panel_http import PANEL_ENTRY_URL, DashboardPanelEntryView
 from .restart_automation import async_sync_seeded_automations
 from .storage import resolve_config_path, write_json_atomic
 from .tailscale_http import TailscaleLoginUrlView, TailscaleStatusView
@@ -93,6 +94,9 @@ NOTIFICATION_CLEANUP_INTERVAL = timedelta(hours=24)
 # boot order the way `frontend`'s is — it works whether www/ was just
 # created a second ago or has existed for months, and needs no restart.
 STATIC_URL_PREFIX = "/everrise_dashboard_static"
+# Where panel.js actually is. The panel itself is registered at
+# PANEL_ENTRY_URL instead, which redirects here with a per-build ?v= so the
+# Companion app can't keep running an old build — see panel_http.py.
 PANEL_JS_URL = f"{STATIC_URL_PREFIX}/panel.js"
 PANEL_WEBCOMPONENT_NAME = "everrise-dashboard-panel"
 PANEL_URL_PATH = "everrise"
@@ -225,12 +229,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.http.register_view(EverriseUpdateAcceptView(hass))
         hass.http.register_view(EverriseUpdateInstallView(hass))
         hass.http.register_view(EverriseUpdateRestartView(hass))
+        # The address the panel is loaded from — redirects to the current
+        # build's panel.js. See panel_http.py.
+        hass.http.register_view(DashboardPanelEntryView(hass, PANEL_JS_URL))
         hass.data[DOMAIN]["view_registered"] = True
 
     # Same one-time-per-process reasoning as the HTTP view above — panel
     # registration has no "reload"/"update" story either (it's a straight
     # call into the frontend's built-in panel table), so a config entry
     # reload must not try to register the same frontend_url_path twice.
+    # That's also why the module address is the redirecting PANEL_ENTRY_URL
+    # rather than panel.js itself: a new build never needs the panel
+    # registered again to reach phones — see panel_http.py.
     if not hass.data[DOMAIN].get("panel_registered"):
         try:
             await async_register_panel(
@@ -239,7 +249,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 webcomponent_name=PANEL_WEBCOMPONENT_NAME,
                 sidebar_title="EverRise",
                 sidebar_icon="mdi:home-lightning-bolt",
-                module_url=PANEL_JS_URL,
+                module_url=PANEL_ENTRY_URL,
                 require_admin=False,
                 embed_iframe=False,
                 trust_external=False,
