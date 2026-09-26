@@ -9,5 +9,6 @@
 
 ## What's new
 
+- Automations built in the dashboard can now turn switches on and off, including lights and fans that Home Assistant runs as switches. This is what the dashboard's new "Turn a switch on or off" action needs.
 - After a dashboard update, phones and tablets now open the new version straight away. Before, the Home Assistant app could keep showing the previous version until its cache was cleared by hand.
 - Home Assistant's own update notice for the dashboard no longer keeps offering a version you've already installed from the Updates screen.

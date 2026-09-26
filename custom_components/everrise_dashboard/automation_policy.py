@@ -86,6 +86,15 @@ ALLOWED_ACTION_SERVICES = frozenset(
         "light.turn_off",
         "fan.turn_on",
         "fan.turn_off",
+        # The builder's "Turn a switch on or off" action (any switch.*
+        # entity), and a light or fan that Home Assistant runs as a switch —
+        # the light/fan action calls turn_on/turn_off in the entity's own
+        # domain, so before these were here that kind of light could not be
+        # saved at all. Entity services only, like the light/fan pair above:
+        # a switch a household member can turn on here is one they can
+        # already turn on from Home Assistant itself.
+        "switch.turn_on",
+        "switch.turn_off",
         "lock.lock",
         "lock.unlock",
         "alarm_control_panel.alarm_arm_away",
