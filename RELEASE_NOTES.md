@@ -9,6 +9,4 @@
 
 ## What's new
 
-- Automations built in the dashboard can now turn switches on and off, including lights and fans that Home Assistant runs as switches. This is what the dashboard's new "Turn a switch on or off" action needs.
-- After a dashboard update, phones and tablets now open the new version straight away. Before, the Home Assistant app could keep showing the previous version until its cache was cleared by hand.
-- Home Assistant's own update notice for the dashboard no longer keeps offering a version you've already installed from the Updates screen.
+- Admin → Rooms can now list what your Broadlink remote has learnt, so a fan's speed buttons are set up by picking its name from the list instead of typing it. Only the names are read, only for an admin, and nothing leaves your Home Assistant.

@@ -25,6 +25,7 @@ from .const import (
     NOTIFICATION_RETENTION_DAYS,
 )
 from .automations_http import EverriseAutomationView, EverriseAutomationsView
+from .broadlink_http import BroadlinkLearntView
 from .default_panel import async_apply_default_panel
 from .frontend_updater import install_latest, www_dir
 from .http import DashboardConfigView
@@ -214,6 +215,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # is non-admin — see automations_http.py and automation_policy.py.
         hass.http.register_view(EverriseAutomationsView(hass))
         hass.http.register_view(EverriseAutomationView(hass))
+        # Admin → Rooms: what each Broadlink remote has learnt (names only,
+        # admin only), so a fan's device is picked rather than typed. See
+        # broadlink_http.py.
+        hass.http.register_view(BroadlinkLearntView(hass))
         # Message Centre — read-only history of logged notifications, plus
         # their attached snapshots if any. See notifications_http.py.
         hass.http.register_view(EverriseNotificationsView(hass))
