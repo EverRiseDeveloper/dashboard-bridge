@@ -49,3 +49,11 @@ log_notification:
       example: "front_door_1737012345"
       selector:
         text:
+
+summarize_night:
+  name: Summarize last night
+  description: >-
+    Writes the overnight summary for the last whole night (11 pm to 6 am)
+    now, instead of waiting for 6 am, and returns it. The EverRise dashboard
+    shows it on Home until midday. Uses the home's AI to word it only when
+    that's switched on in the dashboard's Admin → Home.

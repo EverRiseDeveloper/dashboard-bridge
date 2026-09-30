@@ -40,6 +40,8 @@ from .notifications_store import (
     async_handle_log_notification,
     async_prune_notifications,
 )
+from .overnight import async_setup_overnight
+from .overnight_http import EverriseOvernightView
 from .panel_http import PANEL_ENTRY_URL, DashboardPanelEntryView
 from .restart_automation import async_sync_seeded_automations
 from .storage import resolve_config_path, write_json_atomic
@@ -200,6 +202,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _bootstrap_frontend_if_missing(hass)
     await async_sync_seeded_automations(hass)
     await _async_register_notifications_service(hass)
+    # What happened overnight, written at 6 am — see overnight.py.
+    await async_setup_overnight(hass, entry)
 
     # The HTTP view is registered once for the lifetime of this HA process —
     # aiohttp's router has no public "unregister route" API, so re-adding or
@@ -224,6 +228,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.http.register_view(EverriseNotificationsView(hass))
         hass.http.register_view(EverriseNotificationView(hass))
         hass.http.register_view(EverriseNotificationImageView(hass))
+        # The overnight summary Home shows each morning — see overnight.py.
+        hass.http.register_view(EverriseOvernightView(hass))
         # Tailscale onboarding — a login URL to open, and a stateless,
         # log-derived status check (no stored helper entity — see
         # tailscale_http.py).
