@@ -43,6 +43,7 @@ from .notifications_store import (
 from .overnight import async_setup_overnight
 from .overnight_http import EverriseOvernightView
 from .panel_http import PANEL_ENTRY_URL, DashboardPanelEntryView
+from .plan_advice_http import EverrisePlanAdviceView
 from .restart_automation import async_sync_seeded_automations
 from .storage import resolve_config_path, write_json_atomic
 from .tailscale_http import TailscaleLoginUrlView, TailscaleStatusView
@@ -230,6 +231,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.http.register_view(EverriseNotificationImageView(hass))
         # The overnight summary Home shows each morning — see overnight.py.
         hass.http.register_view(EverriseOvernightView(hass))
+        # The energy plan's advice, from the home's AI at most every ten
+        # minutes for the whole home — see plan_advice.py.
+        hass.http.register_view(EverrisePlanAdviceView(hass))
         # Tailscale onboarding — a login URL to open, and a stateless,
         # log-derived status check (no stored helper entity — see
         # tailscale_http.py).
