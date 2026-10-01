@@ -11,6 +11,7 @@
 
 ## What's new
 
+- The "Connect this home to Tailscale" banner no longer shows on a home whose Tailscale is already connected. The bridge only looked at the last part of Tailscale's log for the moment it connected, and after a few hours of normal running that line had scrolled out of it. It now reads Tailscale's whole log since it last started. No dashboard update needed.
 - The energy plan's advice now comes from your home's AI (a Gemini Flash model when there is one). The bridge asks it at most every 10 minutes for the whole home and shares the answer with every phone and tablet. When the AI is busy, the last advice stays, with when it was written, and it asks again 10 minutes later. Needs the EverRise dashboard 3.1.0.
 - Last night's summary now also goes into the Message Centre each morning, one message per night, so it can be read after it leaves Home at 9 am.
 - Every morning at 6 am, the dashboard writes what happened in the house between 11 pm and 6 am: doors, locks, the alarm, cameras, people coming and going, and which lights came on and why. Home shows it until midday.

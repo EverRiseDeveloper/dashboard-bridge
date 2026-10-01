@@ -87,18 +87,19 @@ _TIMESTAMPED_AUTH_URL_RE = re.compile(
 # "Running" — tailscaled's own definitive "connected" state, not an
 # add-on-specific phrasing, so this should hold across versions:
 #     2026/09/19 21:04:13 Switching ipn state Starting -> Running (WantRunning=true, nm=true)
-# This is what async_is_tailscale_authenticated below now keys off of —
-# see that function's docstring for why the previous "is a login URL
-# absent from the tail" heuristic gave a false "still waiting" right
-# after a real successful login.
-_RUNNING_STATE_RE = re.compile(
-    r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} Switching ipn state \S+ -> Running",
+# It logs every other change of state the same way ("-> NeedsLogin" when
+# it wants a login, "-> Stopped", ...), so the last such line says where it
+# stands now. This is what async_is_tailscale_authenticated below keys off
+# of — see that function's docstring for why the previous "is a login URL
+# absent from the tail" heuristic gave a false "still waiting" right after
+# a real successful login.
+_IPN_STATE_RE = re.compile(
+    r"^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} Switching ipn state \S+ -> (\S+)",
     re.MULTILINE,
 )
 
 # The add-on prints this block once `tailscale serve` picks up HA's own
-# local web server (confirmed live, same capture as _RUNNING_STATE_RE
-# above):
+# local web server (confirmed live, same capture as _IPN_STATE_RE above):
 #     Available within your tailnet:
 #     https://homeassistant-1.tail135c31.ts.net/
 #     |-- proxy http://127.0.0.1:80
@@ -107,14 +108,15 @@ _RUNNING_STATE_RE = re.compile(
 # connected, see async_maybe_apply_tailscale_external_url below.
 _TAILNET_URL_RE = re.compile(r"Available within your tailnet:\s*\n(https://\S+)")
 
-# Only the tail of the log matters — the full session log can span the
-# add-on's entire uptime, and an old login attempt from hours or days ago
-# (a customer who force-reauthed, or a first attempt nobody completed
-# before it expired) shouldn't count against a device that authenticated
-# successfully since. 200 lines comfortably covers several minutes of the
-# reauth loop's own cadence with margin either side, without requiring any
-# log timestamp parsing (whose timezone relative to this process isn't
-# something to assume).
+# The login URL and the tailnet address are read from only the tail of the
+# log — the full session log can span the add-on's entire uptime, and a
+# link from an old login attempt hours or days ago (a customer who
+# force-reauthed, or a first attempt nobody completed before it expired)
+# isn't the one to hand out now. 200 lines comfortably covers several
+# minutes of the reauth loop's own cadence with margin either side,
+# without requiring any log timestamp parsing (whose timezone relative to
+# this process isn't something to assume). Whether it's logged in is read
+# from the whole log instead — see async_is_tailscale_authenticated.
 _LOG_TAIL_LINES = 200
 
 
@@ -160,10 +162,10 @@ async def async_find_tailscale_addon_slug(hass: HomeAssistant) -> str | None:
     return None
 
 
-async def _async_fetch_log_tail(hass: HomeAssistant, slug: str) -> str | None:
-    """Shared by the two functions below — one Supervisor log fetch,
-    trimmed to its last _LOG_TAIL_LINES lines. None on any failure (no
-    Supervisor/token, add-on not running, network hiccup)."""
+async def _async_fetch_log(hass: HomeAssistant, slug: str) -> str | None:
+    """One Supervisor fetch of the add-on's whole log since it last
+    started. None on any failure (no Supervisor/token, add-on not running,
+    network hiccup)."""
     headers = _auth_headers()
     if headers is None:
         return None
@@ -182,54 +184,68 @@ async def _async_fetch_log_tail(hass: HomeAssistant, slug: str) -> str | None:
     except (ClientError, TimeoutError) as err:
         _LOGGER.debug("Couldn't fetch %s's log from Supervisor: %s", slug, err)
         return None
+    return text
 
-    return "\n".join(text.splitlines()[-_LOG_TAIL_LINES:])
+
+async def _async_fetch_log_tail(hass: HomeAssistant, slug: str) -> str | None:
+    """The add-on's log trimmed to its last _LOG_TAIL_LINES lines, for the
+    login URL and the tailnet address below. None on any failure."""
+    text = await _async_fetch_log(hass, slug)
+    return None if text is None else "\n".join(text.splitlines()[-_LOG_TAIL_LINES:])
+
+
+def authenticated_from_log(log: str) -> bool | None:
+    """Whether the add-on's log since it last started says Tailscale is
+    logged in. True when tailscaled's last change of state was into Running
+    and no login link came after it; False when its last state is anything
+    else (NeedsLogin, Stopped, ...) or a link came after Running (a new
+    login pending, e.g. a forced reauth); None when the log has no change
+    of state in it to go by."""
+    last_state: str | None = None
+    last_state_end = -1
+    for match in _IPN_STATE_RE.finditer(log):
+        last_state, last_state_end = match.group(1), match.end()
+    if last_state is None:
+        return None
+    if last_state != "Running":
+        return False
+    last_url_end = -1
+    for match in _LOGIN_URL_RE.finditer(log):
+        last_url_end = match.end()
+    return last_url_end < last_state_end
 
 
 async def async_is_tailscale_authenticated(hass: HomeAssistant, slug: str) -> bool | None:
     """Best-effort read of whether the Tailscale add-on is past its initial
     login (True), still waiting on it (False), or the state can't be
     determined right now (None — no Supervisor/token, add-on not running,
-    network hiccup, etc).
+    network hiccup, or a log with no change of state in it yet).
 
     Heuristic, not an authoritative API. This used to be "is a login URL
     absent from the tail" — but confirmed live, that gives a false
     negative right after a real successful login: tailscaled never
     removes the "Received auth URL: https://login.tailscale.com/a/..."
     line from its own log once you've used it, so that URL is usually
-    still sitting in the last _LOG_TAIL_LINES lines for a while even
-    after login genuinely succeeds.
+    still sitting in the log for a while even after login genuinely
+    succeeds. It was then fixed to key off tailscaled's own "Switching
+    ipn state ... -> Running" line, compared with the last AuthURL line
+    (same "last match, never first" rule as async_get_latest_login_url),
+    but only within the last _LOG_TAIL_LINES lines.
 
-    Fixed by keying off tailscaled's own "Switching ipn state ... ->
-    Running" transition (_RUNNING_STATE_RE) instead, and — since both a
-    stale AuthURL line and a Running line can legitimately both be
-    present in the tail at once — comparing which one happened more
-    recently, same "last match, never first" rule the rest of this
-    module already follows (see async_get_latest_login_url) since a
-    restart invalidates whatever came before it. No Running line at all
-    in the tail means definitely not connected yet; a Running line with
-    no AuthURL line after it (or none at all) means authenticated; an
-    AuthURL line that comes after the last Running line means a new
-    login is pending (e.g. a forced reauth) even though an old session
-    once succeeded.
+    That tail gave a false "not connected" on a box that had been
+    connected for hours, confirmed live on 1 Oct 2026: the Running line is
+    logged once, when tailscaled connects, and routine lines (netcheck,
+    magicsock) had pushed it out of the last 200 lines by the afternoon,
+    so the dashboard showed the "Connect this home to Tailscale" banner on
+    a working connection. So this reads the whole log since the add-on
+    last started (the same single Supervisor fetch, just not trimmed) and
+    goes by tailscaled's last change of state in it — see
+    authenticated_from_log.
     """
-    tail = await _async_fetch_log_tail(hass, slug)
-    if tail is None:
+    log = await _async_fetch_log(hass, slug)
+    if log is None:
         return None
-
-    last_running_end: int | None = None
-    for match in _RUNNING_STATE_RE.finditer(tail):
-        last_running_end = match.end()
-    if last_running_end is None:
-        return False
-
-    last_url_end: int | None = None
-    for match in _LOGIN_URL_RE.finditer(tail):
-        last_url_end = match.end()
-    if last_url_end is None:
-        return True
-
-    return last_running_end > last_url_end
+    return authenticated_from_log(log)
 
 
 async def async_get_latest_login_url(hass: HomeAssistant, slug: str) -> str | None:
