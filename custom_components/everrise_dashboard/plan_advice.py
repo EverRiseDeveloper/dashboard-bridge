@@ -1,15 +1,18 @@
-"""The energy plan's advice: the home's AI (Home Assistant's AI Task, a
-Gemini Flash model when there is one) reads the house's numbers and the
-weather, which the dashboard sends (lib/adviceFacts.ts in the dashboard
-repo), and says what to do in the next hour and tonight.
+"""The energy plan's advice: the home's AI (Home Assistant's AI Task) reads
+the house's numbers and the weather, which the dashboard sends
+(lib/adviceFacts.ts in the dashboard repo), and says what to do in the next
+hour and tonight.
 
-Asked at most once every ten minutes for the whole home, whichever phone or
-tablet asks, so every screen shows the same advice. When the AI is busy or
-can't be reached, the last good advice stays, with when it was written, and
-it's asked again ten minutes later. Kept under this integration's own
-storage (never in www/), so it outlives a restart, and read through the
-authenticated API in plan_advice_http.py. Nothing is sent anywhere unless
-the home has an AI set up in Home Assistant.
+A Gemini Flash model is asked first; when it's busy (Google's "high demand"
+503s are common) or fails, a Flash-Lite model is asked straight away
+instead, and the advice says which model wrote it. Asked at most once every
+ten minutes for the whole home, whichever phone or tablet asks, so every
+screen shows the same advice. When no model can answer, the last good
+advice stays, with when it was written, and it's asked again ten minutes
+later. Kept under this integration's own storage (never in www/), so it
+outlives a restart, and read through the authenticated API in
+plan_advice_http.py. Nothing is sent anywhere unless the home has an AI set
+up in Home Assistant.
 """
 
 from __future__ import annotations
@@ -32,7 +35,10 @@ _LOGGER = logging.getLogger(__name__)
 
 # The AI is asked at most this often, and this long after an ask that failed.
 GAP = timedelta(minutes=10)
-AI_TIMEOUT_S = 60
+# Each model gets this long, and at most this many are tried per ask: Flash,
+# then Flash-Lite when Flash is busy.
+AI_TIMEOUT_S = 45
+MODELS_PER_ASK = 2
 
 
 def _store_path(hass: HomeAssistant) -> Path:
@@ -50,17 +56,30 @@ def _read(hass: HomeAssistant) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def pick_ai(hass: HomeAssistant) -> str | None:
-    """The home's AI: a Flash model when there is one, then Google's, then any."""
-    tasks = sorted(
+def _rank(words: str) -> int:
+    """Flash first, then Flash-Lite, then any other Google model, then the rest."""
+    if "flash" in words:
+        return 1 if "lite" in words else 0
+    return 2 if re.search("google|gemini", words) else 3
+
+
+def ai_order(hass: HomeAssistant) -> list[str]:
+    """The home's AIs (AI Task entities that aren't unavailable), in the order
+    they're asked."""
+    tasks = [
         (state.entity_id, f"{state.entity_id} {state.attributes.get('friendly_name', '')}".lower())
         for state in hass.states.async_all("ai_task")
         if state.state != "unavailable"
-    )
-    for pattern in ("flash", "google|gemini"):
-        if found := next((entity_id for entity_id, words in tasks if re.search(pattern, words)), None):
-            return found
-    return tasks[0][0] if tasks else None
+    ]
+    return [entity_id for entity_id, words in sorted(tasks, key=lambda task: (_rank(task[1]), task[0]))]
+
+
+def name_of(hass: HomeAssistant, entity_id: str) -> str:
+    """The name the household gave a model in Home Assistant ("Google AI Task
+    Flash"), or its entity id without one."""
+    state = hass.states.get(entity_id)
+    name = state.attributes.get("friendly_name") if state else None
+    return name if isinstance(name, str) and name.strip() else entity_id
 
 
 def _time(value: Any) -> datetime | None:
@@ -85,10 +104,14 @@ class PlanAdvice:
 
     def _view(self, record: dict[str, Any]) -> dict[str, Any]:
         last = _time(record.get("lastTry"))
+        model = record.get("model")
         return {
-            "ai": pick_ai(self._hass) is not None,
+            "ai": bool(ai_order(self._hass)),
             "advice": record.get("advice"),
             "at": record.get("at"),
+            # Which model wrote it; advice kept from before the name was
+            # saved with it goes by the model's name now.
+            "model": record.get("modelName") or (name_of(self._hass, model) if isinstance(model, str) else None),
             "busy": bool(record.get("busy")),
             "updating": self._asking(),
             "nextTry": (last + GAP).isoformat() if last else None,
@@ -105,46 +128,54 @@ class PlanAdvice:
         if not self._asking():
             last = _time(record.get("lastTry"))
             due = last is None or dt_util.utcnow() - last >= GAP
-            if due and pick_ai(self._hass) is not None:
+            if due and ai_order(self._hass):
                 self._task = self._hass.async_create_task(self._ask(record, facts), "EverRise plan advice")
         if self._task is not None and not self._task.done():
             try:
-                async with asyncio.timeout(AI_TIMEOUT_S + 5):
+                async with asyncio.timeout(AI_TIMEOUT_S * MODELS_PER_ASK + 5):
                     await asyncio.shield(self._task)
             except TimeoutError:
                 pass
         return self._view(record)
 
+    async def _ask_one(self, entity_id: str, instructions: str) -> tuple[dict[str, str] | None, str]:
+        """One model's advice, or None and why not."""
+        try:
+            async with asyncio.timeout(AI_TIMEOUT_S):
+                response = await self._hass.services.async_call(
+                    "ai_task",
+                    "generate_data",
+                    {"entity_id": entity_id, "task_name": TASK_NAME, "instructions": instructions, "structure": STRUCTURE},
+                    blocking=True,
+                    return_response=True,
+                )
+        except Exception as err:  # noqa: BLE001 - busy, out of quota or unreachable: the next model is asked
+            return None, str(err) or type(err).__name__
+        advice = accept_advice(response.get("data") if isinstance(response, dict) else None)
+        return advice, "" if advice else "its answer didn't have the advice in it"
+
     async def _ask(self, record: dict[str, Any], facts: str) -> None:
-        now = dt_util.utcnow()
-        record["lastTry"] = now.isoformat()
-        entity_id = pick_ai(self._hass)
-        advice: dict[str, str] | None = None
-        problem = "there's no AI Task in Home Assistant"
-        if entity_id is not None:
-            try:
-                async with asyncio.timeout(AI_TIMEOUT_S):
-                    response = await self._hass.services.async_call(
-                        "ai_task",
-                        "generate_data",
-                        {
-                            "entity_id": entity_id,
-                            "task_name": TASK_NAME,
-                            "instructions": instructions_of(facts, place_of(self._hass.config.time_zone)),
-                            "structure": STRUCTURE,
-                        },
-                        blocking=True,
-                        return_response=True,
-                    )
-                advice = accept_advice(response.get("data") if isinstance(response, dict) else None)
-                problem = "its answer didn't have the advice in it"
-            except Exception as err:  # noqa: BLE001 - busy, out of quota or unreachable: the last advice stays
-                problem = str(err) or type(err).__name__
-        if advice:
-            record.update(advice=advice, at=now.isoformat(), busy=False, model=entity_id)
+        record["lastTry"] = dt_util.utcnow().isoformat()
+        instructions = instructions_of(facts, place_of(self._hass.config.time_zone))
+        problems: list[str] = []
+        for entity_id in ai_order(self._hass)[:MODELS_PER_ASK]:
+            advice, problem = await self._ask_one(entity_id, instructions)
+            if advice:
+                record.update(
+                    advice=advice,
+                    at=dt_util.utcnow().isoformat(),
+                    busy=False,
+                    model=entity_id,
+                    modelName=name_of(self._hass, entity_id),
+                )
+                break
+            problems.append(f"{entity_id}: {problem}")
         else:
             record["busy"] = True
-            _LOGGER.warning("Plan advice: the home's AI couldn't answer (%s), so it's asked again in 10 minutes", problem)
+            _LOGGER.warning(
+                "Plan advice: the home's AI couldn't answer (%s), so it's asked again in 10 minutes",
+                "; ".join(problems) or "there's no AI Task in Home Assistant",
+            )
         try:
             await self._hass.async_add_executor_job(write_json_atomic, _store_path(self._hass), dict(record))
         except OSError as err:
