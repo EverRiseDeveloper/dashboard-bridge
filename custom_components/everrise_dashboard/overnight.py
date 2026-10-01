@@ -10,9 +10,11 @@ the night leaves the house unless that switch is on.
 
 Kept for KEEP_NIGHTS nights under this integration's own storage (never in
 www/), and read by the dashboard through the authenticated API in
-overnight_http.py; Home shows the morning's until midday. Runs once at
-6:00:30, again after a restart during the morning if it missed 6 am, and
-whenever `everrise_dashboard.summarize_night` is called.
+overnight_http.py: Home shows the morning's until 9 am. It also goes into
+the Message Centre, where it stays to be read later, as one message per
+night (written again, not twice, if the night is summarized again). Runs
+once at 6:00:30, again after a restart during the morning if it missed
+6 am, and whenever `everrise_dashboard.summarize_night` is called.
 """
 
 from __future__ import annotations
@@ -30,7 +32,8 @@ from homeassistant.helpers.event import async_call_later, async_track_time_chang
 from homeassistant.util import dt as dt_util
 
 from .const import CONF_FILENAME, CONF_FOLDER, DEFAULT_FILENAME, DEFAULT_FOLDER, DOMAIN
-from .overnight_words import accept_ai, ai_request, summarize
+from .notifications_store import put_notification
+from .overnight_words import MESSAGE_TITLE, accept_ai, ai_request, message_of, summarize
 from .storage import base_dir, read_json, resolve_config_path, write_json_atomic
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,8 +41,9 @@ _LOGGER = logging.getLogger(__name__)
 SERVICE_SUMMARIZE_NIGHT = "summarize_night"
 START_HOUR = 23
 END_HOUR = 6
-# Home shows the morning's summary until then; a restart before it catches up.
-SHOW_UNTIL_HOUR = 12
+# A restart after 6 am and before this still writes the morning's summary
+# (Home shows it until 9 am; Messages keeps it).
+CATCH_UP_UNTIL_HOUR = 12
 KEEP_NIGHTS = 14
 AI_TIMEOUT_S = 90
 _STATE_OF = re.compile(r"^state of ([a-z_]+\.[A-Za-z0-9_]+)")
@@ -219,6 +223,9 @@ async def async_summarize_night(hass: HomeAssistant, entry: ConfigEntry, now: da
         if words := await _ai_words(hass, record):
             record.update({"ai": True, "aiHeadline": words["headline"], "aiSummary": words["summary"]})
     await hass.async_add_executor_job(_save_night, hass, record)
+    await hass.async_add_executor_job(
+        put_notification, hass, f"overnight-{record['date']}", MESSAGE_TITLE, message_of(record)
+    )
     return record
 
 
@@ -244,7 +251,7 @@ async def async_setup_overnight(hass: HomeAssistant, entry: ConfigEntry) -> None
 
     async def _catch_up(_now: datetime) -> None:
         now = dt_util.now()
-        if not END_HOUR <= now.hour < SHOW_UNTIL_HOUR:
+        if not END_HOUR <= now.hour < CATCH_UP_UNTIL_HOUR:
             return
         nights = await hass.async_add_executor_job(read_nights, hass)
         if not any(n.get("date") == now.date().isoformat() for n in nights):

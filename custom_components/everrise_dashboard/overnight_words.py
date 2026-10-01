@@ -295,6 +295,23 @@ def summarize(
     }
 
 
+# ---- In Messages ----------------------------------------------------------------
+
+MESSAGE_TITLE = "Last night, 11 pm to 6 am"
+
+
+def message_of(record: dict[str, Any]) -> str:
+    """The night as a Message Centre message: the headline (the AI's, with
+    its few sentences, when it wrote one), then a line for each thing that
+    happened."""
+    parts = [str(record.get("aiHeadline") or record["headline"])]
+    if record.get("aiSummary"):
+        parts.append(str(record["aiSummary"]))
+    if record.get("lines"):
+        parts.append("\n".join(f"• {line}" for line in record["lines"]))
+    return "\n\n".join(parts)
+
+
 # ---- The AI ---------------------------------------------------------------------
 
 def ai_facts(record: dict[str, Any]) -> str:

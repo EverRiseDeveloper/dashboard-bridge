@@ -165,6 +165,33 @@ def add_notification(
     return record
 
 
+def put_notification(
+    hass: HomeAssistant,
+    notification_id: str,
+    title: str,
+    message: str,
+    target: str | None = None,
+) -> dict[str, Any]:
+    """Like add_notification, but a record written again under the same id
+    replaces the earlier one instead of sitting beside it — for writers that
+    may run more than once for the same thing, like the overnight summary
+    when it's written again after a restart. Keeps the first record's time,
+    so it doesn't jump up the list. Runs on the executor."""
+    path = index_path(hass)
+    records = load_index(path)
+    earlier = next((r for r in records if r.get("id") == notification_id), None)
+    record: dict[str, Any] = {
+        "id": notification_id,
+        "created": earlier.get("created", time.time()) if earlier else time.time(),
+        "title": title,
+        "message": message,
+        "target": target,
+        "has_image": False,
+    }
+    write_index_atomic(path, [record, *[r for r in records if r.get("id") != notification_id]])
+    return record
+
+
 def list_notifications(hass: HomeAssistant, limit: int = 200) -> list[dict[str, Any]]:
     records = load_index(index_path(hass))
     records.sort(key=lambda r: r.get("created", 0), reverse=True)

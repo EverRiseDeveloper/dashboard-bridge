@@ -10,5 +10,6 @@
 
 ## What's new
 
+- Last night's summary now also goes into the Message Centre each morning, one message per night, so it can be read after it leaves Home at 9 am.
 - Every morning at 6 am, the dashboard writes what happened in the house between 11 pm and 6 am: doors, locks, the alarm, cameras, people coming and going, and which lights came on and why. Home shows it until midday.
 - Admin → Rooms can now list what your Broadlink remote has learnt, so a fan's speed buttons are set up by picking its name from the list instead of typing it. Only the names are read, only for an admin, and nothing leaves your Home Assistant.

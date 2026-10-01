@@ -55,5 +55,6 @@ summarize_night:
   description: >-
     Writes the overnight summary for the last whole night (11 pm to 6 am)
     now, instead of waiting for 6 am, and returns it. The EverRise dashboard
-    shows it on Home until midday. Uses the home's AI to word it only when
-    that's switched on in the dashboard's Admin → Home.
+    shows it on Home until 9 am, and it's kept in the Message Centre. Uses
+    the home's AI to word it only when that's switched on in the
+    dashboard's Admin → Home.
