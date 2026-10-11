@@ -2,10 +2,12 @@
 into Home Assistant's www/ folder.
 
 Two call sites use this: __init__.py's first-run bootstrap (a bare bridge
-install should produce a working dashboard, not a 404 in www/), and
-update.py's Update entity Install button (a client picking up a new build
-later). Both funnel through install_latest() below so the download/extract
-logic can't drift between the two.
+install should produce a working dashboard, not a 404 in www/), and the
+dashboard's own Software update screen (update_manager.py — only after a
+household member has read the notes and tapped Install). Both funnel
+through install_frontend_version() below so the download/extract logic
+can't drift between the two, and both name an exact tagged release:
+nothing here can install whatever happens to be on the main branch.
 
 Deliberately does not shell out to `git`: Home Assistant OS's core
 container doesn't ship a git binary, so this downloads dashboard-dist as a
@@ -29,11 +31,10 @@ import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DIST_REPO_NAME, DIST_REPO_OWNER, DIST_TARBALL_URL, DIST_VERSION_URL, WWW_SUBFOLDER
+from .const import DIST_REPO_NAME, DIST_REPO_OWNER, WWW_SUBFOLDER
 
 _LOGGER = logging.getLogger(__name__)
 
-_VERSION_FETCH_TIMEOUT = aiohttp.ClientTimeout(total=10)
 _DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=120)
 
 
@@ -79,55 +80,6 @@ async def get_panel_cache_token(hass: HomeAssistant) -> str | None:
     return await hass.async_add_executor_job(_read_panel_cache_token, www_dir(hass))
 
 
-async def fetch_latest_version(hass: HomeAssistant) -> tuple[str | None, str | None]:
-    """The newest version published to dashboard-dist, as
-    ``(version, error)`` — exactly one of the two is ever set.
-
-    A small, single-file fetch — cheap enough to call on every periodic
-    check without pulling down the whole build just to compare versions.
-
-    The error is RETURNED rather than only logged, because logging it here
-    was actively misleading in practice. This function used to swallow
-    every failure at ``_LOGGER.debug`` and return ``None``, and ``None``
-    means "nothing newer" to the caller — so a box that could not reach
-    GitHub at all reported a confident, permanently stale "up to date",
-    and the only record of why sat below the default log level. That cost
-    real time twice: once chasing a stalled check on the dev box, and
-    again on Client_003, where the reason turned out to be
-    ``Cannot connect to host raw.githubusercontent.com:443 ssl:default
-    [Network unreachable]`` — visible only after turning debug on by hand
-    and waiting out a 15-minute poll. Handing the reason back lets the
-    coordinator put it in the warning it already logs, and publish it as
-    an entity attribute so the dashboard's own About tab can show it.
-    """
-    session = async_get_clientsession(hass)
-    try:
-        async with session.get(
-            f"{DIST_VERSION_URL}?_={uuid4().hex}", timeout=_VERSION_FETCH_TIMEOUT
-        ) as resp:
-            if resp.status != 200:
-                return None, f"GitHub answered HTTP {resp.status}"
-            data = await resp.json(content_type=None)
-    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
-        # str(err) on an aiohttp connector error already reads well enough
-        # to put in front of an installer ("Cannot connect to host ...
-        # [Network unreachable]"). asyncio.TimeoutError stringifies to ""
-        # though, so name it explicitly rather than surfacing a blank.
-        if isinstance(err, asyncio.TimeoutError):
-            reason = (
-                f"Timed out after {int(_VERSION_FETCH_TIMEOUT.total or 0)}s "
-                "waiting for raw.githubusercontent.com"
-            )
-        else:
-            reason = str(err) or err.__class__.__name__
-        return None, reason
-    version = data.get("version") if isinstance(data, dict) else None
-    if version is None:
-        return None, "version.json had no \"version\" field"
-    return str(version), None
-
-
-
 def _extract_tarball(archive_path: Path, target: Path) -> None:
     """Extract GitHub's tarball (which wraps everything in a single
     `<repo>-<branch>/` top-level directory) and atomically swap it in for
@@ -159,29 +111,24 @@ def _extract_tarball(archive_path: Path, target: Path) -> None:
 
 
 def _tarball_url_for_version(version: str) -> str:
-    """A SPECIFIC tagged release's tarball, not whatever's currently on
-    main. Used by the Updates screen's install endpoint, which must fetch
-    exactly the release a customer consented to — DIST_TARBALL_URL (main
-    branch) would risk installing a build that landed after they read the
-    notes and accepted, which they never saw or consented to."""
+    """A SPECIFIC tagged release's tarball, never whatever's currently on
+    main: the Software update screen must install exactly the release a
+    customer read the notes for and consented to, not a build that landed
+    after they accepted."""
     return f"https://codeload.github.com/{DIST_REPO_OWNER}/{DIST_REPO_NAME}/tar.gz/refs/tags/{version}"
 
 
-async def install_latest(hass: HomeAssistant, version: str | None = None) -> bool:
-    """Download dashboard-dist's build and swap it into www/. Returns True
-    on success.
-
-    The version argument left out (None) pulls whatever's currently on the
-    main branch — used by the bare first-install bootstrap (__init__.py)
-    and the native Update entity's Install button (update.py), neither of
-    which have a specific consented-to version to pin to. The Updates
-    screen's install endpoint (update_manager.py) always passes an
-    explicit version instead — see _tarball_url_for_version above for why
-    that distinction matters."""
+async def install_frontend_version(hass: HomeAssistant, version: str) -> bool:
+    """Download one tagged dashboard-dist release and swap it into www/.
+    Returns True on success. The version is required — see
+    _tarball_url_for_version above."""
+    if not version:
+        _LOGGER.error("Refusing to install the dashboard without a specific release version")
+        return False
     session = async_get_clientsession(hass)
     tmp_dir = Path(hass.config.path(".storage")) / f"everrise_dashboard_dl_{uuid4().hex}"
     archive_path = tmp_dir / "dashboard-dist.tar.gz"
-    tarball_url = _tarball_url_for_version(version) if version else DIST_TARBALL_URL
+    tarball_url = _tarball_url_for_version(version)
 
     def _make_tmp_dir() -> None:
         tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -195,7 +142,7 @@ async def install_latest(hass: HomeAssistant, version: str | None = None) -> boo
     try:
         async with session.get(tarball_url, timeout=_DOWNLOAD_TIMEOUT) as resp:
             if resp.status != 200:
-                _LOGGER.error("Downloading dashboard-dist failed: HTTP %s", resp.status)
+                _LOGGER.error("Downloading dashboard-dist %s failed: HTTP %s", version, resp.status)
                 return False
             data = await resp.read()
 
@@ -206,7 +153,7 @@ async def install_latest(hass: HomeAssistant, version: str | None = None) -> boo
         await hass.async_add_executor_job(_write_and_extract)
         return True
     except (aiohttp.ClientError, asyncio.TimeoutError, OSError, RuntimeError, tarfile.TarError) as err:
-        _LOGGER.error("Failed installing the latest dashboard build: %s", err)
+        _LOGGER.error("Failed installing dashboard %s: %s", version, err)
         return False
     finally:
         await hass.async_add_executor_job(shutil.rmtree, tmp_dir, True)

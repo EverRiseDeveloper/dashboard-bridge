@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from http import HTTPStatus
 
 from aiohttp import web
@@ -16,17 +17,22 @@ from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from .update_consent import record_consent
-from .update_manager import check_for_updates, install_updates
+from .update_history import ACTION_RESTART, record_update_event
+from .update_manager import async_restart_pending, check_for_updates, install_updates
+from .update_runtime import get_update_runtime
 
 _LOGGER = logging.getLogger(__name__)
+
+# A second "yes, restart" inside this window is the same restart, not a new
+# one — Home Assistant takes a while to go down and come back.
+_RESTART_DEDUPE_SECONDS = 180
 
 
 class EverriseUpdateCheckView(HomeAssistantView):
     """GET-only — a live, uncached check against GitHub for both repos.
 
     Available to any logged-in user (read-only, same level as
-    DashboardConfigView's GET) — accepting/installing an update is a
-    separate, admin-only endpoint added in a later phase.
+    DashboardConfigView's GET).
     """
 
     url = "/api/everrise_dashboard/updates/check"
@@ -123,6 +129,10 @@ class EverriseUpdateInstallView(HomeAssistantView):
     cached/earlier check) and never installs a side that doesn't qualify —
     if neither side does, this returns a normal success response saying so,
     not an error.
+
+    One install at a time per house: while one is running, a second request
+    gets 409 with who started it (see update_manager.install_updates). Who
+    tapped Install is recorded from the session, like accept's consent.
     """
 
     url = "/api/everrise_dashboard/updates/install"
@@ -136,7 +146,9 @@ class EverriseUpdateInstallView(HomeAssistantView):
         if hass_user is None:
             return self.json_message("Not authenticated.", HTTPStatus.UNAUTHORIZED)
 
-        result = await install_updates(self._hass)
+        result = await install_updates(self._hass, user_id=hass_user.id, user_name=hass_user.name)
+        if result.get("busy"):
+            return self.json(result, status_code=HTTPStatus.CONFLICT)
         if not result.get("success"):
             # 502: same reasoning as the check endpoint — this view's own
             # logic didn't fail, the live GitHub re-check inside it did.
@@ -145,15 +157,21 @@ class EverriseUpdateInstallView(HomeAssistantView):
 
 
 class EverriseUpdateRestartView(HomeAssistantView):
-    """POST — restarts Home Assistant to finish an install that flagged
-    restartRequired. Fire-and-forget: responds immediately and lets the
-    restart itself happen in the background, since the HTTP response would
-    never actually make it back to the client once the process is going
-    down anyway.
+    """POST — restarts Home Assistant to finish installing a bridge update,
+    when the household member who installed it says yes. This is the only
+    restart the update flow ever does: there is no scheduled one.
 
-    Deliberately NO admin gate, same reasoning as install/accept above —
-    finishing an update any household member already consented to and
-    installed doesn't need a higher bar than starting it did.
+    Refused (409) while an install is running — a restart in the middle of
+    swapping the bridge's files could leave it without its folder — and
+    when there's no installed update waiting for a restart, so this can't
+    be used to restart the house for any other reason. A second "yes"
+    shortly after the first doesn't restart again. Who asked is recorded.
+
+    Fire-and-forget: responds immediately and lets the restart itself happen
+    in the background, since the HTTP response would never make it back to
+    the client once the process is going down anyway.
+
+    Deliberately NO admin gate, same reasoning as install/accept above.
     """
 
     url = "/api/everrise_dashboard/updates/restart"
@@ -166,6 +184,45 @@ class EverriseUpdateRestartView(HomeAssistantView):
         hass_user = request.get("hass_user")
         if hass_user is None:
             return self.json_message("Not authenticated.", HTTPStatus.UNAUTHORIZED)
+
+        runtime = get_update_runtime(self._hass)
+        if runtime.install_lock.locked():
+            who = (runtime.installing or {}).get("userName") or "Someone"
+            return self.json(
+                {
+                    "success": False,
+                    "busy": True,
+                    "error": f"{who} is installing an update right now. Restart once it has finished.",
+                    "installing": dict(runtime.installing or {}),
+                },
+                status_code=HTTPStatus.CONFLICT,
+            )
+
+        now = time.monotonic()
+        if runtime.restart_requested_at is not None and now - runtime.restart_requested_at < _RESTART_DEDUPE_SECONDS:
+            return self.json(
+                {"success": True, "alreadyRestarting": True, "message": "Home Assistant is already restarting."}
+            )
+
+        if not await async_restart_pending(self._hass):
+            return self.json(
+                {"success": False, "error": "There's no installed update waiting for a restart."},
+                status_code=HTTPStatus.CONFLICT,
+            )
+
+        runtime.restart_requested_at = now
+        try:
+            await self._hass.async_add_executor_job(
+                lambda: record_update_event(
+                    self._hass,
+                    action=ACTION_RESTART,
+                    user_id=hass_user.id,
+                    user_name=hass_user.name,
+                    result="requested",
+                )
+            )
+        except Exception as err:  # noqa: BLE001 - never block the restart over the record
+            _LOGGER.warning("Couldn't record who restarted for this update: %s", err)
 
         self._hass.async_create_task(self._hass.services.async_call("homeassistant", "restart"))
         return self.json({"success": True, "message": "Restarting Home Assistant now."})

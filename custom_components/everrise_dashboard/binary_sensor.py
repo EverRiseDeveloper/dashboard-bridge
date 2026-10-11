@@ -1,13 +1,12 @@
 """Flags when this integration's own Python code has been updated on disk
 but Home Assistant hasn't been restarted to actually load it yet.
 
-This is a different question from update.py's "Dashboard frontend" entity,
-which only tracks the dashboard CONTENT (the static files in www/, updated
-without any restart). This bridge's own .py files are a normal Python
-module: HACS can overwrite them on disk at any time, but the already-running
-process keeps executing whatever it imported at startup until it's actually
-restarted — not reloaded (see update.py's docstring for that same
-distinction on the frontend side).
+The dashboard's own files (www/) take effect without any restart. This
+bridge's own .py files are a normal Python module: an install from the
+Software update screen overwrites them on disk, but the already-running
+process keeps executing whatever it imported at startup until Home
+Assistant is actually restarted — not reloaded. The dashboard shows
+"Restart needed" while this is on.
 
 Neither HACS's own bookkeeping nor a plain "is a HACS update pending" check
 can answer "has tonight's restart already happened" reliably: HACS marks a
@@ -19,9 +18,8 @@ scheduled restart apart from a client manually restarting on their own
 first. This entity answers the actual question directly: it compares the
 version this running process loaded at startup against a fresh read of
 manifest.json straight off disk, right now. The two only differ in the
-exact window between "HACS wrote new files" and "Home Assistant was next
-restarted" — regardless of whether that restart was the scheduled 3am one
-or a client doing it manually beforehand.
+window between "an update wrote new files" and "Home Assistant was next
+restarted", however that restart happened.
 """
 
 from __future__ import annotations
@@ -43,8 +41,7 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 # A local file read, not a network call — no need to poll aggressively.
-# The automation this feeds only checks once, at 3am, so freshness within a
-# few minutes is more than enough.
+# An install nudges it straight away anyway (update_manager.py).
 SCAN_INTERVAL = timedelta(minutes=5)
 
 
@@ -86,5 +83,5 @@ class _RestartRequiredSensor(BinarySensorEntity):
         # this integration that touches disk (frontend_updater.py, storage.py).
         disk_version = await self.hass.async_add_executor_job(_read_disk_version, self._manifest_path)
         # None (unreadable manifest) deliberately does NOT flag restart-required
-        # — a transient read glitch shouldn't trigger a 3am restart on its own.
+        # — a transient read glitch shouldn't show "Restart needed" on its own.
         self._attr_is_on = disk_version is not None and disk_version != self._loaded_version

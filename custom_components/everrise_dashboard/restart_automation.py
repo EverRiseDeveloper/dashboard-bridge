@@ -1,62 +1,29 @@
-"""Seeds the one automation that's still needed once an update actually
-installs, and prunes every automation this integration used to seed for
-two update mechanisms that no longer exist: the standalone "EverRise Auto
-Updater" add-on, and (before that) driving HACS's own generated update
-entity for the bridge. Same one-time, never-overwrite pattern __init__.py
-already uses for default_config.json.
+"""Prunes every automation this integration used to seed for updates. None
+is seeded any more: an update is only ever installed when a household
+member taps Install on the dashboard's Software update screen, and Home
+Assistant only restarts for one when that person says yes to the restart
+straight afterwards.
 
-## What's still seeded: the 3am restart safety net
+## What's pruned, on every client, every setup
 
-A backend install (see bridge_updater.py, reached through the dashboard's
-own Updates screen — update_manager.py/update_http.py) writes new Python
-files to disk, but this already-running process keeps executing whatever
-it imported at startup until Home Assistant is actually restarted. The
-Updates screen asks the household member who just installed whether to
-restart right away; if they say "later" (or just close the tab), nothing
-else prompts them again. This automation is that follow-through: it fires
-at 3am, but only restarts if the bridge's own "restart required" sensor
-(binary_sensor.py) says the files on disk still don't match what's loaded.
-It does nothing on any night where a restart already happened, by hand or
-otherwise — the sensor is already off.
-
-## What's pruned: every auto-install automation from the old update flows
-
-Three automations no longer belong on any client's box, because each one
-installed something the moment it was merely AVAILABLE — no release notes
-shown, no consent taken, nothing recorded — which is exactly what the
-Updates screen (and the update_consent.py audit trail behind it) exists to
-stop happening silently:
-
+- Restart HA for pending bridge update: restarted the house at 3am if a
+  bridge update was waiting — nobody chose that moment. If someone says
+  "Not now" to the restart, the update now simply takes effect the next
+  time Home Assistant restarts, and the dashboard keeps showing "Restart
+  needed" until then.
 - Auto-install dashboard frontend update: installed a new dashboard-dist
-  build the instant update.py's coordinator saw one.
+  build the instant the old update entity saw one — no notes shown, no
+  consent taken.
 - Force-check bridge update / Auto-install bridge update: a HACS-era pair
-  that refreshed and then auto-installed HACS's own generated bridge
-  update entity.
+  that refreshed and then auto-installed HACS's own bridge update entity.
 
-None of these are conditional on whether HACS (or the old add-on) is
-still present the way an earlier version of this file treated them —
-every client gets all three removed unconditionally now, because the
-replacement isn't "a different auto-installer", it's the Updates screen
-itself: the bridge downloads and installs a specific release directly
-(frontend_updater.py / bridge_updater.py) only once a household member has
-actually seen the release notes and ticked the consent box.
+They live in automations.yaml (the same file the Automation Editor reads
+and writes), so this edits that file once per setup and only if one of
+them is actually there. Assumes the default HAOS layout (`automation:
+!include automations.yaml`); a box without that simply has nothing to prune.
 
-Why automations.yaml rather than something this integration just does in
-Python directly: a client should be able to see, disable, or delete any of
-these like any other automation — not have it be invisible behavior baked
-into the integration. automations.yaml is a plain, user-facing YAML file
-(not `.storage/`, which is Home Assistant's internal state) — the same file
-the Automation Editor UI itself reads and writes; this only differs in doing
-it once, programmatically, on first setup (for the one still seeded) or on
-every setup (for pruning — a client who re-adds one of these three by hand
-is assumed to know what they're doing, but that's an edge case none of our
-clients have hit, so this doesn't specifically special-case it).
-
-Assumes the default HAOS onboarding layout (`automation: !include
-automations.yaml` in configuration.yaml). A client whose configuration.yaml
-doesn't include automations.yaml that way won't have the restart automation
-seeded — same as any other YAML-file automation would need adding by hand
-in that case.
+The seeding machinery below is kept (SEEDED_AUTOMATIONS is empty) so a
+future automation can be added the same never-overwrite way.
 """
 
 from __future__ import annotations
@@ -73,45 +40,27 @@ from homeassistant.exceptions import HomeAssistantError
 
 _LOGGER = logging.getLogger(__name__)
 
-# Fixed and stable across every client — how we recognize "already seeded"
-# on every future setup, and the fixed ids every pruned automation was
-# seeded under. binary_sensor.py's entity has a deterministic, device-less
-# slug (it's the only entity of its kind on a single-instance-per-client
-# config entry), so hardcoding it here is safe.
-RESTART_REQUIRED_SENSOR = "binary_sensor.bridge_restart_required"
-
+# The fixed ids every pruned automation was seeded under — the same on
+# every client.
 RESTART_AUTOMATION_ID = "everrise_dashboard_restart_if_pending"
 
 FORCE_CHECK_BRIDGE_AUTOMATION_ID = "everrise_dashboard_force_check_bridge_update"
 AUTO_INSTALL_AUTOMATION_ID = "everrise_dashboard_auto_install_bridge_update"
 AUTO_INSTALL_FRONTEND_AUTOMATION_ID = "everrise_dashboard_auto_install_frontend_update"
 
-# Every automation an earlier version of this file used to seed for a
-# now-retired auto-install flow — see the module docstring. Pruned
-# unconditionally, on every client, regardless of whether HACS or the old
-# add-on happens to still be present.
+# Every automation an earlier version of this file seeded — see the module
+# docstring. Pruned unconditionally, on every client.
 PRUNED_AUTOMATION_IDS = frozenset(
-    {FORCE_CHECK_BRIDGE_AUTOMATION_ID, AUTO_INSTALL_AUTOMATION_ID, AUTO_INSTALL_FRONTEND_AUTOMATION_ID}
+    {
+        RESTART_AUTOMATION_ID,
+        FORCE_CHECK_BRIDGE_AUTOMATION_ID,
+        AUTO_INSTALL_AUTOMATION_ID,
+        AUTO_INSTALL_FRONTEND_AUTOMATION_ID,
+    }
 )
 
-SEEDED_AUTOMATIONS = [
-    {
-        "id": RESTART_AUTOMATION_ID,
-        "alias": "Restart HA for pending bridge update",
-        "description": (
-            "Only restarts if a backend update was installed from the dashboard's Updates screen "
-            "but Home Assistant hasn't been restarted to load it yet (see the bridge's \"Bridge "
-            "restart required\" binary sensor) — if this client already restarted (from the Updates "
-            "screen's own prompt, or manually) that sensor is already off and this does nothing at "
-            "3am. Seeded automatically by the bridge on first setup; edit or delete it like any "
-            "other automation — it's never re-created once it exists."
-        ),
-        "triggers": [{"trigger": "time", "at": "03:00:00"}],
-        "conditions": [{"condition": "state", "entity_id": RESTART_REQUIRED_SENSOR, "state": "on"}],
-        "actions": [{"action": "homeassistant.restart"}],
-        "mode": "single",
-    },
-]
+# Nothing is seeded today — see the module docstring.
+SEEDED_AUTOMATIONS: list[dict] = []
 
 
 def _sync(automations_path: Path, prune_ids: frozenset[str]) -> bool:
@@ -176,7 +125,7 @@ def _sync(automations_path: Path, prune_ids: frozenset[str]) -> bool:
         _LOGGER.info("Seeded %d automation(s) at %s", len(to_add), automations_path)
     if pruned:
         _LOGGER.info(
-            "Removed %d automation(s) from a retired auto-install flow (%s) from %s",
+            "Removed %d automation(s) from a retired auto-update flow (%s) from %s",
             len(pruned),
             ", ".join(pruned),
             automations_path,

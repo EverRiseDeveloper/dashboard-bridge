@@ -32,26 +32,12 @@ WWW_SUBFOLDER = "everrise-dashboard"
 # container doesn't ship a git binary.
 DIST_REPO_OWNER = "EverRiseDeveloper"
 DIST_REPO_NAME = "dashboard-dist"
-DIST_REPO_BRANCH = "main"
-DIST_VERSION_URL = (
-    f"https://raw.githubusercontent.com/{DIST_REPO_OWNER}/{DIST_REPO_NAME}/{DIST_REPO_BRANCH}/version.json"
-)
-DIST_TARBALL_URL = (
-    f"https://codeload.github.com/{DIST_REPO_OWNER}/{DIST_REPO_NAME}/tar.gz/refs/heads/{DIST_REPO_BRANCH}"
-)
-
-# hass.data[DOMAIN] key for update.py's version coordinator, so the
-# dashboard's own Updates screen (update_manager.py) can refresh it straight
-# after installing a build — otherwise HA's "Dashboard frontend" update
-# entity would keep calling the old build installed, and offer an update,
-# until its next poll.
-FRONTEND_UPDATE_COORDINATOR = "frontend_update_coordinator"
 
 # The bridge's OWN repo — public too (HACS pulls it directly). Used by the
 # EverRise dashboard's Updates screen (update_manager.py) for its live
-# "check for updates" call — separate from DIST_VERSION_URL/DIST_TARBALL_URL
-# above, which the background frontend-only coordinator (update.py) and
-# frontend_updater.py use.
+# "check for updates" call, and by its read-only background check
+# (update_notifier.py). Nothing ever downloads from either repo's main
+# branch any more — only tagged releases.
 BRIDGE_REPO_OWNER = "EverRiseDeveloper"
 BRIDGE_REPO_NAME = "dashboard-bridge"
 
@@ -76,3 +62,8 @@ DIST_RELEASES_LATEST_URL = (
 # never as a public /local/ static file.
 NOTIFICATIONS_SUBDIR = "notifications"
 NOTIFICATION_RETENTION_DAYS = 30
+
+# The sidebar path the dashboard panel is registered at (see __init__.py).
+# Also used for tap links in pushes, which open /<this>?... on the server
+# that sent them.
+PANEL_URL_PATH = "everrise"

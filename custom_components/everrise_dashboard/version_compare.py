@@ -1,6 +1,6 @@
-"""Plain three-part semver comparison, shared by update.py's background
-coordinator (HA's native Updates page) and update_manager.py's live
-check-for-updates flow (the EverRise dashboard's own Updates screen).
+"""Plain three-part semver comparison, used by update_manager.py's
+check-for-updates flow (the dashboard's Software update screen and the
+background check in update_notifier.py).
 
 Kept deliberately minimal — this integration controls both ends of every
 version string it ever compares (package.json/manifest.json on the way in,
