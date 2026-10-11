@@ -47,6 +47,14 @@ from .panel_http import PANEL_ENTRY_URL, DashboardPanelEntryView
 from .plan_advice_http import EverrisePlanAdviceView
 from .restart_automation import async_sync_seeded_automations
 from .storage import resolve_config_path, write_json_atomic
+from .spotify_http import (
+    EverriseSpotifyAlbumView,
+    EverriseSpotifyDevicesView,
+    EverriseSpotifyLibraryView,
+    EverriseSpotifyPlaylistView,
+    EverriseSpotifyPlayView,
+    EverriseSpotifySearchView,
+)
 from .tailscale_http import TailscaleLoginUrlView, TailscaleStatusView
 from .update_http import (
     EverriseUpdateAcceptView,
@@ -238,6 +246,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Home's light-hearted headline, from the home's AI at most once an
         # hour for the whole home — see headlines.py.
         hass.http.register_view(EverriseHeadlinesView(hass))
+        # The Media page's Spotify browser: playlists, songs, search, and
+        # starting what was picked on a speaker, with the Spotify
+        # integration's own login — see spotify_http.py.
+        hass.http.register_view(EverriseSpotifyDevicesView(hass))
+        hass.http.register_view(EverriseSpotifyLibraryView(hass))
+        hass.http.register_view(EverriseSpotifyPlaylistView(hass))
+        hass.http.register_view(EverriseSpotifyAlbumView(hass))
+        hass.http.register_view(EverriseSpotifySearchView(hass))
+        hass.http.register_view(EverriseSpotifyPlayView(hass))
         # Tailscale onboarding — a login URL to open, and a stateless,
         # log-derived status check (no stored helper entity — see
         # tailscale_http.py).
