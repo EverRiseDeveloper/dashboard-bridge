@@ -12,6 +12,7 @@ from homeassistant.components.panel_custom import async_register_panel
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
@@ -23,11 +24,12 @@ from .const import (
     DEFAULT_SET_DEFAULT_PANEL,
     DOMAIN,
     NOTIFICATION_RETENTION_DAYS,
+    PANEL_URL_PATH,
 )
 from .automations_http import EverriseAutomationView, EverriseAutomationsView
 from .broadlink_http import BroadlinkLearntView
 from .default_panel import async_apply_default_panel
-from .frontend_updater import install_latest, www_dir
+from .frontend_updater import install_frontend_version, www_dir
 from .http import DashboardConfigView
 from .notifications_http import (
     EverriseNotificationImageView,
@@ -56,14 +58,17 @@ from .spotify_http import (
     EverriseSpotifySearchView,
 )
 from .tailscale_http import TailscaleLoginUrlView, TailscaleStatusView
+from .update_history import ACTION_FIRST_INSTALL, record_update_event
 from .update_http import (
     EverriseUpdateAcceptView,
     EverriseUpdateCheckView,
     EverriseUpdateInstallView,
     EverriseUpdateRestartView,
 )
+from .update_manager import fetch_latest_frontend_release
+from .update_notifier import async_setup_update_notifier
 
-PLATFORMS: list[Platform] = [Platform.UPDATE, Platform.BINARY_SENSOR, Platform.SENSOR]
+PLATFORMS: list[Platform] = [Platform.BINARY_SENSOR, Platform.SENSOR]
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -112,7 +117,6 @@ STATIC_URL_PREFIX = "/everrise_dashboard_static"
 # Companion app can't keep running an old build — see panel_http.py.
 PANEL_JS_URL = f"{STATIC_URL_PREFIX}/panel.js"
 PANEL_WEBCOMPONENT_NAME = "everrise-dashboard-panel"
-PANEL_URL_PATH = "everrise"
 
 # Bundled alongside this file — ships inside custom_components/everrise_dashboard/
 # with every HACS install, same as manifest.json or the translations folder.
@@ -143,21 +147,57 @@ def _seed_default_config_if_missing(hass: HomeAssistant, folder: str, filename: 
 
 async def _bootstrap_frontend_if_missing(hass: HomeAssistant) -> None:
     """Installing the bridge alone should produce a working dashboard, not
-    a 404 in www/ — so the very first setup downloads dashboard-dist the
-    same way the Update entity's Install button later does (see
-    frontend_updater.py). An existing install (any prior build already
-    sitting in www/) is left alone; this only ever fires once per client."""
+    a 404 in www/ — so the very first setup downloads the newest TAGGED
+    dashboard-dist release (never the main branch; see frontend_updater.py).
+    An existing install (any prior build already sitting in www/) is left
+    alone; this only ever fires once per client, at installation. Every
+    later update goes through the Software update screen."""
     target = www_dir(hass)
     already_installed = await hass.async_add_executor_job(lambda: target.exists() and any(target.iterdir()))
     if already_installed:
         return
-    _LOGGER.info("No dashboard frontend found at %s — installing the latest build", target)
-    if not await install_latest(hass):
+    version, error = await fetch_latest_frontend_release(hass)
+    if version is None:
+        _LOGGER.error(
+            "Couldn't find the latest dashboard release to install (%s). The bridge/config API will "
+            "still work, but the dashboard itself won't load until this is retried (reload the "
+            "integration) or installed manually.",
+            error,
+        )
+        return
+    _LOGGER.info("No dashboard frontend found at %s — installing release %s", target, version)
+    ok = await install_frontend_version(hass, version)
+    try:
+        await hass.async_add_executor_job(
+            lambda: record_update_event(
+                hass,
+                action=ACTION_FIRST_INSTALL,
+                user_id=None,
+                user_name=None,
+                result="installed" if ok else "failed",
+                frontend_version=version,
+            )
+        )
+    except Exception as err:  # noqa: BLE001 - the record is a bonus, never a reason to fail setup
+        _LOGGER.debug("Couldn't record the first dashboard install: %s", err)
+    if not ok:
         _LOGGER.error(
             "Couldn't install the dashboard frontend automatically. The bridge/config API will still "
-            "work, but the dashboard itself won't load until this is retried (reload the integration, "
-            "or wait for the Update entity's next check) or installed manually."
+            "work, but the dashboard itself won't load until this is retried (reload the integration) "
+            "or installed manually."
         )
+
+
+def _remove_retired_update_entity(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """The "Dashboard frontend" update entity is gone (its Install button in
+    Home Assistant's own Settings > Updates skipped the T&C and installed
+    from the main branch). Without this its registry entry would linger as
+    "unavailable" on every box that had it."""
+    registry = er.async_get(hass)
+    entity_id = registry.async_get_entity_id("update", DOMAIN, f"{entry.entry_id}_frontend_update")
+    if entity_id is not None:
+        registry.async_remove(entity_id)
+        _LOGGER.info("Removed the retired %s entity", entity_id)
 
 
 async def _register_static_path_if_missing(hass: HomeAssistant) -> None:
@@ -166,8 +206,8 @@ async def _register_static_path_if_missing(hass: HomeAssistant) -> None:
     this is cheap and idempotent-guarded the same way as the HTTP view and
     panel below; the target directory is created up front (even if empty)
     because aiohttp's static route needs the path to exist at registration
-    time — _bootstrap_frontend_if_missing (or the Update entity later)
-    fills it with real files afterward, and this route serves whatever's
+    time — _bootstrap_frontend_if_missing (or a Software update install
+    later) fills it with real files afterward, and this route serves whatever's
     there on each request, not a snapshot taken at registration."""
     if hass.data[DOMAIN].get("static_path_registered"):
         return
@@ -211,6 +251,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _register_static_path_if_missing(hass)
     await _bootstrap_frontend_if_missing(hass)
     await async_sync_seeded_automations(hass)
+    _remove_retired_update_entity(hass, entry)
     await _async_register_notifications_service(hass)
     # What happened overnight, written at 6 am — see overnight.py.
     await async_setup_overnight(hass, entry)
@@ -331,6 +372,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
+    # Read-only check for new releases every 3 hours; pushes once per new
+    # version. Never installs — see update_notifier.py.
+    await async_setup_update_notifier(hass, entry)
+
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
 
@@ -338,7 +383,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # The HTTP view, static path, and panel registration all stay in place
     # regardless (see notes above — there's no "unregister" for any of
-    # them), but the Update entity platform does need a normal unload.
+    # them), but the sensor platforms do need a normal unload.
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 

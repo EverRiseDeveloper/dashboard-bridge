@@ -1,22 +1,26 @@
-"""Live "check for updates" logic behind the EverRise dashboard's own
-Updates screen (update_http.py) — distinct from update.py's
-_LatestVersionCoordinator, which polls in the background every 15 minutes
-purely to drive HA's native Updates page. This module only runs when a
-customer explicitly clicks "Check for updates", and never caches: every
-call is a fresh GitHub hit for both repos.
+"""Check and install logic behind the EverRise dashboard's own Software
+update screen (update_http.py), also used by the read-only background check
+(update_notifier.py). There is no other way an update gets installed: the
+old update entity and every auto-install automation are gone.
 
-Deliberately all-or-nothing: if either GitHub call fails, the whole check
-fails and says which side broke, rather than returning whichever side did
-succeed. A partially-known result (e.g. "no idea about the backend, but
-here's the frontend") is a worse outcome here than a plain retry prompt —
-this flow is what gates a real install, not just a status badge, so it
-should never let a customer act on half a picture.
+The check is deliberately all-or-nothing: if either GitHub call fails, the
+whole check fails and says which side broke, rather than returning
+whichever side did succeed. A partially-known result (e.g. "no idea about
+the backend, but here's the frontend") is a worse outcome here than a plain
+retry prompt — this flow is what gates a real install, not just a status
+badge, so it should never let a customer act on half a picture.
+
+Installs run one at a time per house (see update_runtime.py): a second tap
+while one is running is turned away with who started it, rather than
+downloading and swapping the same files twice.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -24,11 +28,14 @@ import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.loader import IntegrationNotFound, async_get_integration
+from homeassistant.util import dt as dt_util
 
 from .bridge_updater import install_bridge_version
-from .const import BRIDGE_RELEASES_LATEST_URL, DIST_RELEASES_LATEST_URL, DOMAIN, FRONTEND_UPDATE_COORDINATOR
-from .frontend_updater import get_installed_version, install_latest as install_frontend_version
+from .const import BRIDGE_RELEASES_LATEST_URL, DIST_RELEASES_LATEST_URL, DOMAIN
+from .frontend_updater import get_installed_version, install_frontend_version
 from .update_consent import get_all_consents
+from .update_history import ACTION_INSTALL, record_update_event
+from .update_runtime import UpdateRuntime, get_update_runtime
 from .version_compare import latest_is_newer
 
 _LOGGER = logging.getLogger(__name__)
@@ -36,10 +43,25 @@ _LOGGER = logging.getLogger(__name__)
 _RELEASE_FETCH_TIMEOUT = aiohttp.ClientTimeout(total=10)
 
 
-async def _get_installed_backend_version(hass: HomeAssistant) -> str | None:
-    """Whatever's actually running right now — read via Home Assistant's
-    own integration loader rather than re-parsing manifest.json by hand, so
-    this can never disagree with what HA itself thinks is installed."""
+# This integration's own manifest.json, read fresh off disk. Once a bridge
+# update has been installed it holds the NEW version, even though the old
+# code keeps running until Home Assistant restarts.
+_MANIFEST_PATH = Path(__file__).parent / "manifest.json"
+
+
+def _read_manifest_version(path: Path) -> str | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    version = data.get("version") if isinstance(data, dict) else None
+    return str(version) if version is not None else None
+
+
+async def _get_loaded_backend_version(hass: HomeAssistant) -> str | None:
+    """The version this running process actually loaded at startup — Home
+    Assistant's integration loader caches the manifest it imported, so
+    this does NOT change when new files land on disk."""
     try:
         integration = await async_get_integration(hass, DOMAIN)
     except IntegrationNotFound:
@@ -52,15 +74,35 @@ async def _get_installed_backend_version(hass: HomeAssistant) -> str | None:
     return str(version) if version is not None else None
 
 
+async def _get_installed_backend_version(hass: HomeAssistant) -> str | None:
+    """What's installed on disk, which is what "is there anything newer?"
+    has to compare against. Using the loaded version instead meant a
+    customer who installed a bridge update and chose "Not now" for the
+    restart was offered — and could reinstall — the same update again,
+    because the running code still reported the old version."""
+    on_disk = await hass.async_add_executor_job(_read_manifest_version, _MANIFEST_PATH)
+    if on_disk is not None:
+        return on_disk
+    return await _get_loaded_backend_version(hass)
+
+
+async def async_restart_pending(hass: HomeAssistant) -> bool:
+    """True when a bridge update is installed on disk but the running code
+    is still the old one — the only time the Software update screen's
+    restart is allowed (see update_http.py)."""
+    on_disk = await hass.async_add_executor_job(_read_manifest_version, _MANIFEST_PATH)
+    loaded = await _get_loaded_backend_version(hass)
+    return on_disk is not None and loaded is not None and on_disk != loaded
+
+
 async def _fetch_latest_release(hass: HomeAssistant, url: str) -> tuple[str | None, str | None, str | None]:
     """One GitHub "latest release" call. Returns
     (version, release_notes, error) — exactly one of (version + notes) or
     error is meaningfully set. The failure reason is handed back rather
-    than swallowed, matching frontend_updater.fetch_latest_version's
-    existing discipline (see that function's docstring — a box that
-    couldn't reach GitHub has silently reported a false "up to date"
-    before; this flow refuses to repeat that, see check_for_updates
-    below)."""
+    than swallowed: a box that couldn't reach GitHub has silently reported
+    a false "up to date" before (the old update entity did exactly that on
+    Client_003), and this flow refuses to repeat it — see check_for_updates
+    below."""
     session = async_get_clientsession(hass)
     try:
         async with session.get(
@@ -86,9 +128,9 @@ async def _fetch_latest_release(hass: HomeAssistant, url: str) -> tuple[str | No
 
 
 async def check_for_updates(hass: HomeAssistant) -> dict[str, Any]:
-    """The live check behind the Updates screen's "Check for updates"
-    button. Always hits GitHub fresh — no caching, matching the "only
-    checks when a customer actually asks" design.
+    """The live check behind the Software update screen and the background
+    check. Always hits GitHub fresh — never a cached answer. Read-only:
+    nothing here downloads or installs anything.
 
     Returns either
         {"success": True, "backend": {...}, "frontend": {...}}
@@ -133,6 +175,14 @@ async def check_for_updates(hass: HomeAssistant) -> dict[str, Any]:
         },
     }
 
+async def fetch_latest_frontend_release(hass: HomeAssistant) -> tuple[str | None, str | None]:
+    """The newest tagged dashboard-dist release, as (version, error) — for
+    the first-run bootstrap, which installs that exact release rather than
+    whatever is on the main branch."""
+    version, _notes, error = await _fetch_latest_release(hass, DIST_RELEASES_LATEST_URL)
+    return version, error
+
+
 _RESTART_REQUIRED_ENTITY_ID = "binary_sensor.bridge_restart_required"
 
 
@@ -163,22 +213,91 @@ async def _nudge_restart_required_sensor(hass: HomeAssistant) -> None:
         _LOGGER.debug("Couldn't nudge %s after install: %s", _RESTART_REQUIRED_ENTITY_ID, err)
 
 
-async def _refresh_frontend_update_entity(hass: HomeAssistant) -> None:
-    """Best-effort, like the restart sensor nudge above: makes HA's own
-    "Dashboard frontend" update entity re-read the version now on disk, so
-    it stops offering the build that was just installed. It would catch up
-    on its next 15-minute poll anyway."""
-    coordinator = hass.data.get(DOMAIN, {}).get(FRONTEND_UPDATE_COORDINATOR)
-    if coordinator is None:
-        return
+async def install_updates(hass: HomeAssistant, *, user_id: str | None, user_name: str | None) -> dict[str, Any]:
+    """The install behind the Software update screen's Install button — the
+    only way an update gets installed.
+
+    One install at a time per house. If one is already running, this
+    returns straight away with
+        {"success": False, "busy": True, "error": "...", "installing": {...}}
+    (who started it and when) and touches nothing. Otherwise it holds the
+    lock for the whole install, records who tapped Install and what
+    happened (update_history.py), and returns what _install_qualifying
+    returns.
+    """
+    runtime = get_update_runtime(hass)
+    # No await between this check and taking the lock, so two taps can't
+    # both get past it.
+    if runtime.install_lock.locked():
+        installing = dict(runtime.installing or {})
+        who = installing.get("userName") or "Someone"
+        return {
+            "success": False,
+            "busy": True,
+            "error": f"{who} is already installing this update. It will be ready in a moment.",
+            "installing": installing,
+        }
+
+    async with runtime.install_lock:
+        runtime.installing = {
+            "userId": user_id,
+            "userName": user_name,
+            "startedAt": dt_util.now().isoformat(),
+            "backendVersion": None,
+            "frontendVersion": None,
+        }
+        runtime.async_notify()
+        result: dict[str, Any] | None = None
+        try:
+            result = await _install_qualifying(hass, runtime)
+            return result
+        finally:
+            runtime.installing = None
+            runtime.async_notify()
+            await _record_install(hass, user_id, user_name, result)
+
+
+async def _record_install(
+    hass: HomeAssistant, user_id: str | None, user_name: str | None, result: dict[str, Any] | None
+) -> None:
+    """Never lets a failure to write the record fail the install itself."""
+    if result is None:
+        outcome, backend_version, frontend_version, detail = "error", None, None, "Install stopped unexpectedly"
+    elif not result.get("success"):
+        outcome, backend_version, frontend_version, detail = "check_failed", None, None, result.get("error")
+    else:
+        sides = [result["backend"], result["frontend"]]
+        attempted = [side for side in sides if side["attempted"]]
+        if not attempted:
+            outcome = "nothing_to_install"
+        elif all(side["installed"] for side in attempted):
+            outcome = "installed"
+        elif any(side["installed"] for side in attempted):
+            outcome = "partly_installed"
+        else:
+            outcome = "failed"
+        backend_version = result["backend"]["version"] if result["backend"]["attempted"] else None
+        frontend_version = result["frontend"]["version"] if result["frontend"]["attempted"] else None
+        detail = "; ".join(side["error"] for side in sides if side["error"]) or None
     try:
-        await coordinator.async_request_refresh()
-    except Exception as err:  # noqa: BLE001 - never fail the install over this
-        _LOGGER.debug("Couldn't refresh the frontend update entity after install: %s", err)
+        await hass.async_add_executor_job(
+            lambda: record_update_event(
+                hass,
+                action=ACTION_INSTALL,
+                user_id=user_id,
+                user_name=user_name,
+                result=outcome,
+                backend_version=backend_version,
+                frontend_version=frontend_version,
+                detail=detail,
+            )
+        )
+    except Exception as err:  # noqa: BLE001 - see docstring
+        _LOGGER.warning("Couldn't record who installed this update: %s", err)
 
 
-async def install_updates(hass: HomeAssistant) -> dict[str, Any]:
-    """The live install behind the Updates screen's "Install" action.
+async def _install_qualifying(hass: HomeAssistant, runtime: UpdateRuntime) -> dict[str, Any]:
+    """Runs only while holding the install lock (see install_updates).
 
     Re-runs check_for_updates fresh (same all-or-nothing GitHub rule as
     the check endpoint itself — refuses and asks for a retry rather than
@@ -197,12 +316,8 @@ async def install_updates(hass: HomeAssistant) -> dict[str, Any]:
 
     Right before actually writing anything for a qualifying side, this
     also re-reads what's currently installed one more time and compares it
-    to the version about to be installed. Installing can take a while (a
-    real download and extract), this endpoint has no admin gate, and a
-    second install request arriving while the first is still running is a
-    real scenario — so if the box is already on the target version by the
-    time this gets here, it skips the redundant reinstall and reports
-    alreadyUpToDate instead of silently doing the work twice.
+    to the version about to be installed — if the box is already on it,
+    this skips the reinstall and reports alreadyUpToDate.
 
     Returns
         {"success": False, "error": "..."}
@@ -237,6 +352,12 @@ async def install_updates(hass: HomeAssistant) -> dict[str, Any]:
     backend_qualifies = backend["available"] and latest_backend_consent == backend["latest"]
     frontend_qualifies = frontend["available"] and latest_frontend_consent == frontend["latest"]
 
+    # Let every open Software update screen say what's being installed.
+    if runtime.installing is not None:
+        runtime.installing["backendVersion"] = backend["latest"] if backend_qualifies else None
+        runtime.installing["frontendVersion"] = frontend["latest"] if frontend_qualifies else None
+        runtime.async_notify()
+
     backend_result = {
         "attempted": False,
         "installed": False,
@@ -253,14 +374,10 @@ async def install_updates(hass: HomeAssistant) -> dict[str, Any]:
     }
 
     if backend_qualifies:
-        # One more, fresh, right-before-writing-anything check: the
-        # "available" flag above came from check_for_updates() at the top
-        # of this same call, but installing can take a while (a real
-        # download+extract), and this endpoint has no admin gate — two
-        # install requests in close succession are a real scenario, not a
-        # hypothetical one. If the box is already on this exact version by
-        # the time we actually get here, skip a redundant reinstall and
-        # say so plainly rather than silently doing the work twice.
+        # One more, fresh, right-before-writing-anything check. The install
+        # lock already stops two installs overlapping; this still catches
+        # a box that's already on this exact version (say, installed a
+        # moment ago by someone else), and says so rather than reinstalling.
         current_backend_version = await _get_installed_backend_version(hass)
         if current_backend_version == backend["latest"]:
             backend_result["version"] = backend["latest"]
@@ -289,8 +406,9 @@ async def install_updates(hass: HomeAssistant) -> dict[str, Any]:
 
     if backend_result["installed"]:
         await _nudge_restart_required_sensor(hass)
+        runtime.async_mark_installed("backend", backend["latest"])
     if frontend_result["installed"]:
-        await _refresh_frontend_update_entity(hass)
+        runtime.async_mark_installed("frontend", frontend["latest"])
 
     return {
         "success": True,
