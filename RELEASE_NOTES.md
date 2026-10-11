@@ -18,4 +18,3 @@
 - Updates only install when someone taps Install on Software update. Home Assistant's own "Dashboard frontend" update, which could install a dashboard build without the release notes or the tick box, has been removed.
 - No more overnight restarts. Before, if nobody restarted after a system update, Home Assistant restarted itself at 3 am. Now it only restarts when someone says yes. If they choose not now, the update takes effect the next time Home Assistant restarts.
 - One install at a time. If two people tap Install together, the second sees who is already installing instead of installing it twice, and Home Assistant can't be restarted from Software update until the install has finished.
-- Fixed: after choosing not to restart straight away, Software update offered the same system update again.
