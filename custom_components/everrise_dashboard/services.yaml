@@ -26,7 +26,7 @@ log_notification:
         Optional label for who/what this was about (e.g. a person or device
         name) — shown in the Message Centre but not used for routing.
       required: false
-      example: "Hakim's phone"
+      example: "Alex's phone"
       selector:
         text:
     camera_entity_id:
