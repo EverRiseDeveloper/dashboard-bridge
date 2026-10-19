@@ -14,4 +14,4 @@
 
 ## What's new
 
-- Automations made in EverRise can now say "is not" in an "Only if". The safety check that decides what EverRise may save now accepts "not" around one allowed check, and nothing more.
+- Tidied the example in the "Log notification" action's description in Home Assistant. Nothing else changes.
