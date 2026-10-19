@@ -294,18 +294,37 @@ def _check_choose(action: dict, where: str, errors: list[str]) -> None:
         errors.append(f"{where}.choose[0].conditions must be a non-empty list")
     else:
         for i, condition in enumerate(conditions):
-            if not isinstance(condition, dict):
-                errors.append(f"{where}.choose[0].conditions[{i}] is not an object")
-                continue
-            kind = condition.get("condition")
-            if kind not in ALLOWED_CONDITIONS:
-                errors.append(f"{where}.choose[0].conditions[{i}] uses '{kind}', which clients may not use")
+            _check_condition(condition, f"{where}.choose[0].conditions[{i}]", errors)
 
     sequence = branch.get("sequence")
     if not isinstance(sequence, list) or len(sequence) != 1:
         errors.append(f"{where}.choose[0].sequence must be a list with exactly one step")
         return
     _check_action(sequence[0], f"{index_label(where)}.choose[0].sequence[0]", errors)
+
+
+def _check_condition(condition: Any, where: str, errors: list[str]) -> None:
+    """One condition block. Besides the allowed kinds, a `not` may wrap
+    exactly one allowed condition (not another `not`) and nothing else —
+    that's how the builder writes "is not"."""
+    if not isinstance(condition, dict):
+        errors.append(f"{where} is not an object")
+        return
+    kind = condition.get("condition")
+    if kind == "not":
+        unexpected = set(condition) - {"condition", "conditions"}
+        if unexpected:
+            errors.append(f"{where} may only use condition and conditions, not {sorted(unexpected)}")
+        inner = condition.get("conditions")
+        if not isinstance(inner, list) or len(inner) != 1 or not isinstance(inner[0], dict):
+            errors.append(f"{where}.conditions must be a list with exactly one condition")
+            return
+        inner_kind = inner[0].get("condition")
+        if inner_kind not in ALLOWED_CONDITIONS:
+            errors.append(f"{where}.conditions[0] uses '{inner_kind}', which clients may not use")
+        return
+    if kind not in ALLOWED_CONDITIONS:
+        errors.append(f"{where} uses '{kind}', which clients may not use")
 
 
 def _check_action(action: Any, index: int | str, errors: list[str]) -> None:
@@ -326,9 +345,7 @@ def _check_action(action: Any, index: int | str, errors: list[str]) -> None:
     # once the door reads closed. Restricted to the same condition types
     # allowed at the automation level.
     if "condition" in action and "action" not in action:
-        kind = action.get("condition")
-        if kind not in ALLOWED_CONDITIONS:
-            errors.append(f"{where} uses condition '{kind}', which clients may not use")
+        _check_condition(action, where, errors)
         return
 
     # A delay block carries no `action` key at all.
@@ -422,12 +439,7 @@ def validate_client_automation(config: Any) -> list[str]:
         errors.append("conditions must be a list")
     else:
         for i, condition in enumerate(conditions):
-            if not isinstance(condition, dict):
-                errors.append(f"conditions[{i}] is not an object")
-                continue
-            kind = condition.get("condition")
-            if kind not in ALLOWED_CONDITIONS:
-                errors.append(f"conditions[{i}] uses '{kind}', which clients may not use")
+            _check_condition(condition, f"conditions[{i}]", errors)
 
     actions = config.get("actions")
     if not isinstance(actions, list) or not actions:

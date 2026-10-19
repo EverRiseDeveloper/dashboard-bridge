@@ -14,7 +14,4 @@
 
 ## What's new
 
-- New updates now tell you. Your home checks for a new EverRise update every 3 hours, and when one is out, every phone and tablet with the Home Assistant app signed in to your home gets a notification. Tap it to go straight to Software update. Each version is announced once, and the same message goes in the Message Centre.
-- Updates only install when someone taps Install on Software update. Home Assistant's own "Dashboard frontend" update, which could install a dashboard build without the release notes or the tick box, has been removed.
-- No more overnight restarts. Before, if nobody restarted after a system update, Home Assistant restarted itself at 3 am. Now it only restarts when someone says yes. If they choose not now, the update takes effect the next time Home Assistant restarts.
-- One install at a time. If two people tap Install together, the second sees who is already installing instead of installing it twice, and Home Assistant can't be restarted from Software update until the install has finished.
+- Automations made in EverRise can now say "is not" in an "Only if". The safety check that decides what EverRise may save now accepts "not" around one allowed check, and nothing more.
